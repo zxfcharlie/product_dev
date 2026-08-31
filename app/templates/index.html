@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Etsy 运营任务管理系统</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-header">📋 任务管理</div>
+    <div id="table-list" class="table-list"></div>
+    <div class="sidebar-footer">
+      <span id="user-name"></span>
+      <a href="#" onclick="logout()">退出</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="view-tabs" id="view-tabs"></div>
+    <div class="toolbar">
+      <button class="btn btn-primary" onclick="openRecordModal()">＋ 添加记录</button>
+      <button class="btn" onclick="openFilterModal()">🔎 筛选 / 排序</button>
+      <span id="filter-summary" class="filter-summary"></span>
+    </div>
+    <div class="grid-wrap">
+      <table class="grid" id="grid-table">
+        <thead id="grid-head"></thead>
+        <tbody id="grid-body"></tbody>
+      </table>
+    </div>
+  </main>
+</div>
+
+<!-- 记录编辑弹窗 -->
+<div id="record-modal" class="modal-mask hidden">
+  <div class="modal">
+    <h3 id="record-modal-title">添加记录</h3>
+    <div id="record-form"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('record-modal')">取消</button>
+      <button class="btn btn-primary" onclick="submitRecord()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 筛选排序弹窗 -->
+<div id="filter-modal" class="modal-mask hidden">
+  <div class="modal">
+    <h3>筛选 / 排序</h3>
+    <div id="filter-rows"></div>
+    <button class="btn btn-sm" onclick="addFilterRow()">＋ 添加筛选条件</button>
+    <hr>
+    <div id="sort-rows"></div>
+    <button class="btn btn-sm" onclick="addSortRow()">＋ 添加排序条件</button>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('filter-modal')">取消</button>
+      <button class="btn" onclick="saveAsView()">保存为视图</button>
+      <button class="btn btn-primary" onclick="applyFilterModal()">应用</button>
+    </div>
+  </div>
+</div>
+
+<script>window.CURRENT_USER = {{ user_json | safe }};</script>
+<script src="/static/app.js"></script>
+</body>
+</html>
