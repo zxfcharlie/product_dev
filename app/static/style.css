@@ -106,3 +106,17 @@ table.grid tr:hover td { background: #fafbfc; }
 
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .hidden { display: none; }
+
+/* ---------- 二期：单元格行内编辑 ---------- */
+.editable-cell { cursor: text; position: relative; }
+.editable-cell:hover { box-shadow: inset 0 0 0 1px #3370ff; background: #f7faff !important; }
+.readonly-cell { background: #fafafa; }
+td.editing { padding: 2px 4px !important; min-width: 140px; }
+.inline-editor {
+  width: 100%; min-width: 120px; padding: 6px 7px; border: 1px solid #3370ff;
+  border-radius: 4px; background: #fff; font: inherit; outline: none;
+}
+select.inline-editor[multiple] { min-width: 180px; }
+textarea.inline-editor { min-height: 64px; resize: vertical; }
+.danger-link { color: #f53f3f !important; }
+.muted { color: #8a8f99; font-size: 12px; }

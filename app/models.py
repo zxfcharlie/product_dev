@@ -16,6 +16,7 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     role = Column(String(16), nullable=False, default="member")  # admin | member
     is_active = Column(Boolean, default=True)
+    note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 

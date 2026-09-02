@@ -1,4 +1,5 @@
 import datetime
+import copy
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -14,11 +15,27 @@ from .. import automation
 router = APIRouter(prefix="/api/tables", tags=["tables"])
 
 
-def _require_table(table_key: str):
+def _require_table(table_key: str, user: User = None):
     schema = get_schema(table_key)
     if not schema:
         raise HTTPException(404, f"未知的表: {table_key}")
+    if schema.get("group") == "config" and (not user or user.role != "admin"):
+        raise HTTPException(403, "配置表仅管理员可访问")
     return schema
+
+
+def _category_options(db: Session):
+    options = []
+    seen = set()
+    rows = db.query(Record).filter(Record.table_key == "category_config").order_by(Record.id.asc()).all()
+    for row in rows:
+        data = row.data or {}
+        for key in ("level1_category", "level2_category"):
+            value = str(data.get(key) or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                options.append(value)
+    return options
 
 
 def _data_expr(field_key: str, field_type: str):
@@ -89,8 +106,15 @@ def _serialize(record: Record):
 
 
 @router.get("/schemas")
-def list_schemas(user: User = Depends(get_current_user)):
-    return TABLE_SCHEMAS
+def list_schemas(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    schemas = copy.deepcopy(TABLE_SCHEMAS)
+    # SKU 类目实时同步配置表；普通成员可使用选项，但不可进入配置表。
+    for field in schemas["sku"]["fields"]:
+        if field.get("key") == "category":
+            field["options"] = _category_options(db)
+    if user.role != "admin":
+        schemas = {k: v for k, v in schemas.items() if v.get("group") != "config"}
+    return schemas
 
 
 class QueryIn(BaseModel):
@@ -101,7 +125,7 @@ class QueryIn(BaseModel):
 @router.post("/{table_key}/query")
 def query_records(table_key: str, payload: QueryIn, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
-    _require_table(table_key)
+    _require_table(table_key, user)
     query = db.query(Record).filter(Record.table_key == table_key)
     query = _apply_filters(query, table_key, payload.filters)
     query = _apply_sorts(query, table_key, payload.sorts)
@@ -116,7 +140,7 @@ class RecordIn(BaseModel):
 @router.post("/{table_key}/records")
 def create_record(table_key: str, payload: RecordIn, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
-    schema = _require_table(table_key)
+    schema = _require_table(table_key, user)
     fmap = field_map(table_key)
     clean_data = {}
     for key, field in fmap.items():
@@ -124,6 +148,9 @@ def create_record(table_key: str, payload: RecordIn, db: Session = Depends(get_d
             continue
         if key in payload.data:
             clean_data[key] = payload.data[key]
+    if table_key == "sku":
+        clean_data["sku_code"] = automation.generate_sku_code(db)
+
     for field in schema["fields"]:
         if field["type"] == "date" and field.get("auto"):
             clean_data[field["key"]] = datetime.date.today().isoformat()
@@ -156,7 +183,7 @@ def create_record(table_key: str, payload: RecordIn, db: Session = Depends(get_d
 @router.put("/{table_key}/records/{record_id}")
 def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
-    _require_table(table_key)
+    _require_table(table_key, user)
     record = db.query(Record).filter(Record.id == record_id, Record.table_key == table_key).first()
     if not record:
         raise HTTPException(404, "记录不存在")
@@ -185,7 +212,7 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
 @router.delete("/{table_key}/records/{record_id}")
 def delete_record(table_key: str, record_id: int, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
-    _require_table(table_key)
+    _require_table(table_key, user)
     record = db.query(Record).filter(Record.id == record_id, Record.table_key == table_key).first()
     if not record:
         raise HTTPException(404, "记录不存在")
@@ -207,6 +234,7 @@ class ViewIn(BaseModel):
 
 @router.get("/{table_key}/views")
 def list_views(table_key: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_table(table_key, user)
     views = db.query(SavedView).filter(
         SavedView.table_key == table_key
     ).filter(or_(SavedView.is_shared == True, SavedView.owner_id == user.id)).all()  # noqa: E712
@@ -220,7 +248,7 @@ def list_views(table_key: str, db: Session = Depends(get_db), user: User = Depen
 @router.post("/{table_key}/views")
 def create_view(table_key: str, payload: ViewIn, db: Session = Depends(get_db),
                  user: User = Depends(get_current_user)):
-    _require_table(table_key)
+    _require_table(table_key, user)
     view = SavedView(
         table_key=table_key, name=payload.name, owner_id=user.id,
         filters=payload.filters, sorts=payload.sorts, is_shared=payload.is_shared,
@@ -234,6 +262,7 @@ def create_view(table_key: str, payload: ViewIn, db: Session = Depends(get_db),
 @router.delete("/{table_key}/views/{view_id}")
 def delete_view(table_key: str, view_id: int, db: Session = Depends(get_db),
                  user: User = Depends(get_current_user)):
+    _require_table(table_key, user)
     view = db.query(SavedView).filter(SavedView.id == view_id, SavedView.table_key == table_key).first()
     if not view:
         raise HTTPException(404, "视图不存在")

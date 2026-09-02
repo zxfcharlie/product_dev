@@ -469,3 +469,271 @@ async function saveAsView() {
 }
 
 init();
+
+// ==================== 二期增强：权限 / 行内编辑 / 用户管理 ====================
+
+function renderSidebar(tableKeys) {
+  const el = document.getElementById("table-list");
+  el.innerHTML = "";
+  const groups = [
+    { key: "business", label: "业务表" },
+    { key: "config", label: "配置表" },
+  ];
+  groups.forEach((g) => {
+    const keysInGroup = tableKeys.filter((k) => (SCHEMAS[k].group || "business") === g.key);
+    if (!keysInGroup.length) return;
+    const header = document.createElement("div");
+    header.className = "sidebar-group-label";
+    header.textContent = g.label;
+    el.appendChild(header);
+    keysInGroup.forEach((key) => {
+      const div = document.createElement("div");
+      div.className = "table-item" + (key === CURRENT_TABLE ? " active" : "");
+      div.textContent = SCHEMAS[key].label;
+      div.onclick = () => selectTable(key);
+      div.dataset.key = key;
+      el.appendChild(div);
+    });
+  });
+
+  if (window.CURRENT_USER.role === "admin") {
+    const header = document.createElement("div");
+    header.className = "sidebar-group-label";
+    header.textContent = "系统管理";
+    el.appendChild(header);
+    const div = document.createElement("div");
+    div.className = "table-item" + (CURRENT_TABLE === "__users__" ? " active" : "");
+    div.textContent = "👥 用户管理";
+    div.dataset.key = "__users__";
+    div.onclick = showUserManagement;
+    el.appendChild(div);
+  }
+}
+
+async function selectTable(key) {
+  if (key === "sku") {
+    SCHEMAS = await api("/api/tables/schemas");
+    const keys = Object.keys(SCHEMAS).sort((a, b) => SCHEMAS[a].order - SCHEMAS[b].order);
+    renderSidebar(keys);
+  }
+  CURRENT_TABLE = key;
+  CURRENT_FILTERS = [];
+  CURRENT_SORTS = [];
+  ACTIVE_VIEW_ID = null;
+  document.querySelectorAll(".table-item").forEach((d) => {
+    d.classList.toggle("active", d.dataset.key === key);
+  });
+  document.querySelector(".toolbar").classList.remove("hidden");
+  document.getElementById("view-tabs").classList.remove("hidden");
+  await loadViews();
+  renderViewTabs();
+  await loadRecords();
+}
+
+function renderTable() {
+  const schema = SCHEMAS[CURRENT_TABLE];
+  const head = document.getElementById("grid-head");
+  const body = document.getElementById("grid-body");
+  head.innerHTML = "";
+  body.innerHTML = "";
+
+  const tr = document.createElement("tr");
+  tr.innerHTML = "<th class='col-idx'>#</th>";
+  schema.fields.forEach((f) => { tr.innerHTML += `<th>${f.label}</th>`; });
+  tr.innerHTML += "<th class='col-actions'>操作</th>";
+  head.appendChild(tr);
+
+  RECORDS.forEach((rec, idx) => {
+    const row = document.createElement("tr");
+    const indexCell = document.createElement("td");
+    indexCell.className = "col-idx";
+    indexCell.textContent = idx + 1;
+    row.appendChild(indexCell);
+
+    schema.fields.forEach((f) => {
+      const td = document.createElement("td");
+      td.innerHTML = renderCell(f, rec.data[f.key]);
+      if (!f.auto) {
+        td.classList.add("editable-cell");
+        td.title = "点击直接编辑";
+        td.onclick = (e) => {
+          if (e.target.closest("a")) return;
+          startInlineEdit(td, rec, f);
+        };
+      } else {
+        td.classList.add("readonly-cell");
+      }
+      row.appendChild(td);
+    });
+
+    const action = document.createElement("td");
+    action.className = "col-actions";
+    action.innerHTML = `<a href="#" onclick="openRecordModal(${rec.id}); return false;">编辑</a>
+      <a href="#" onclick="removeRecord(${rec.id}); return false;">删除</a>`;
+    row.appendChild(action);
+    body.appendChild(row);
+  });
+}
+
+function inlineEditorFor(field, value) {
+  let el;
+  if (field.type === "select") {
+    el = document.createElement("select");
+    el.innerHTML = `<option value="">-- 未设置 --</option>` +
+      (field.options || []).map((o) => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join("");
+    el.value = value || "";
+  } else if (field.type === "multiselect") {
+    el = document.createElement("select");
+    el.multiple = true;
+    el.size = Math.min(Math.max((field.options || []).length, 2), 7);
+    const selected = Array.isArray(value) ? value : [];
+    (field.options || []).forEach((o) => {
+      const op = document.createElement("option");
+      op.value = o;
+      op.textContent = o;
+      op.selected = selected.includes(o);
+      el.appendChild(op);
+    });
+  } else if (field.type === "checkbox") {
+    el = document.createElement("input");
+    el.type = "checkbox";
+    el.checked = value === true || value === "true";
+  } else if (field.type === "rating") {
+    el = document.createElement("select");
+    el.innerHTML = [0,1,2,3,4,5].map((n) => `<option value="${n}">${n === 0 ? "未设置" : "★".repeat(n)}</option>`).join("");
+    el.value = parseInt(value) || 0;
+  } else {
+    el = document.createElement(field.type === "long_text" ? "textarea" : "input");
+    if (el.tagName === "INPUT") {
+      if (field.type === "number") el.type = "number";
+      else if (field.type === "date") el.type = "date";
+      else el.type = "text";
+    }
+    el.value = value ?? "";
+  }
+  el.classList.add("inline-editor");
+  return el;
+}
+
+function inlineValue(field, el) {
+  if (field.type === "multiselect") return [...el.selectedOptions].map((o) => o.value);
+  if (field.type === "checkbox") return el.checked;
+  if (field.type === "rating") return parseInt(el.value) || 0;
+  return el.value;
+}
+
+function startInlineEdit(td, rec, field) {
+  if (td.classList.contains("editing")) return;
+  td.classList.add("editing");
+  const oldHtml = td.innerHTML;
+  const editor = inlineEditorFor(field, rec.data[field.key]);
+  td.innerHTML = "";
+  td.appendChild(editor);
+  editor.focus();
+
+  let saving = false;
+  const cancel = () => {
+    if (saving) return;
+    td.classList.remove("editing");
+    td.innerHTML = oldHtml;
+  };
+  const save = async () => {
+    if (saving) return;
+    saving = true;
+    try {
+      const value = inlineValue(field, editor);
+      const updated = await api(`/api/tables/${CURRENT_TABLE}/records/${rec.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ data: { [field.key]: value } }),
+      });
+      const pos = RECORDS.findIndex((r) => r.id === rec.id);
+      if (pos >= 0) RECORDS[pos] = updated;
+      td.classList.remove("editing");
+      td.innerHTML = renderCell(field, updated.data[field.key]);
+      // 状态字段变更可能自动生成下游任务或同步其他表，因此刷新当前表。
+      if (["status", "is_listed"].includes(field.key)) await loadRecords();
+    } catch (_) {
+      saving = false;
+      cancel();
+    }
+  };
+
+  editor.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); cancel(); }
+    if (e.key === "Enter" && field.type !== "long_text" && field.type !== "multiselect") {
+      e.preventDefault(); save();
+    }
+  });
+  if (field.type === "select" || field.type === "checkbox" || field.type === "rating") {
+    editor.addEventListener("change", save, { once: true });
+  } else {
+    editor.addEventListener("blur", save, { once: true });
+  }
+  if (field.type === "multiselect") {
+    editor.addEventListener("blur", save, { once: true });
+  }
+}
+
+async function showUserManagement() {
+  if (window.CURRENT_USER.role !== "admin") return;
+  CURRENT_TABLE = "__users__";
+  document.querySelectorAll(".table-item").forEach((d) => {
+    d.classList.toggle("active", d.dataset.key === "__users__");
+  });
+  document.querySelector(".toolbar").classList.add("hidden");
+  document.getElementById("view-tabs").classList.add("hidden");
+  const users = await api("/api/auth/users");
+  renderUsersTable(users);
+}
+
+function renderUsersTable(users) {
+  const head = document.getElementById("grid-head");
+  const body = document.getElementById("grid-body");
+  head.innerHTML = `<tr><th>#</th><th>用户名</th><th>显示名称</th><th>角色</th><th>备注</th><th>创建时间</th><th>操作</th></tr>`;
+  body.innerHTML = "";
+  users.forEach((u, i) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td class="col-idx">${i + 1}</td>
+      <td>${escapeHtml(u.username)}</td>
+      <td>${escapeHtml(u.display_name)}</td>
+      <td>${u.role === "admin" ? "管理员" : "成员"}</td>
+      <td class="user-note-cell editable-cell" title="点击编辑备注">${escapeHtml(u.note || "")}</td>
+      <td>${u.created_at ? escapeHtml(u.created_at.slice(0, 10)) : ""}</td>
+      <td class="col-actions">${u.id === window.CURRENT_USER.id ? '<span class="muted">当前账号</span>' : `<a href="#" class="danger-link">删除</a>`}</td>`;
+    const noteCell = tr.querySelector(".user-note-cell");
+    noteCell.onclick = () => editUserNote(noteCell, u);
+    const del = tr.querySelector(".danger-link");
+    if (del) del.onclick = (e) => { e.preventDefault(); deleteManagedUser(u.id, u.display_name); };
+    body.appendChild(tr);
+  });
+}
+
+function editUserNote(td, user) {
+  if (td.classList.contains("editing")) return;
+  td.classList.add("editing");
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "inline-editor";
+  input.value = user.note || "";
+  td.innerHTML = "";
+  td.appendChild(input);
+  input.focus();
+  const save = async () => {
+    const note = input.value;
+    await api(`/api/auth/users/${user.id}/note`, { method: "PUT", body: JSON.stringify({ note }) });
+    user.note = note;
+    td.classList.remove("editing");
+    td.textContent = note;
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); save(); }
+    if (e.key === "Escape") { td.classList.remove("editing"); td.textContent = user.note || ""; }
+  };
+  input.onblur = save;
+}
+
+async function deleteManagedUser(id, name) {
+  if (!confirm(`确定删除用户「${name}」吗？`)) return;
+  await api(`/api/auth/users/${id}`, { method: "DELETE" });
+  await showUserManagement();
+}

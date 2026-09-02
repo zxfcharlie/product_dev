@@ -27,9 +27,9 @@ TABLE_SCHEMAS = {
         "order": 1,
         "group": "business",
         "fields": [
-            {"key": "sku_code", "label": "SKU编号", "type": "text", "required": True},
+            {"key": "sku_code", "label": "SKU编号", "type": "text", "auto": True},
             {"key": "category", "label": "商品类目", "type": "multiselect",
-             "options": ["数字产品", "油画", "数字印刷画", "数字油画"]},
+             "options": [], "dynamic_options": "category_config"},
             {"key": "competitor_link", "label": "竞品链接", "type": "url"},
             {"key": "design_highlight", "label": "设计亮点", "type": "text"},
             {"key": "dev_stage", "label": "开发阶段", "type": "select", "auto": True,

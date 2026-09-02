@@ -6,6 +6,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
+from sqlalchemy import inspect, text
 
 from .database import Base, engine, get_db
 from .routers import auth as auth_router
@@ -20,6 +21,11 @@ def _init_db_with_retry(max_attempts=10, delay_seconds=2):
     for attempt in range(1, max_attempts + 1):
         try:
             Base.metadata.create_all(bind=engine)
+            # 兼容已有一期数据库：create_all 不会给旧表自动补列。
+            columns = {c["name"] for c in inspect(engine).get_columns("users")}
+            if "note" not in columns:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN note TEXT"))
             return
         except OperationalError:
             if attempt == max_attempts:
