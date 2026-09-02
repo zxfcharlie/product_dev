@@ -24,6 +24,10 @@ def _require_table(table_key: str, user: User = None):
     return schema
 
 
+def _user_options(db: Session):
+    return [u.display_name for u in db.query(User).filter(User.is_active == True).order_by(User.id.asc()).all()]  # noqa: E712
+
+
 def _category_options(db: Session):
     options = []
     seen = set()
@@ -108,7 +112,11 @@ def _serialize(record: Record):
 @router.get("/schemas")
 def list_schemas(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     schemas = copy.deepcopy(TABLE_SCHEMAS)
-    # SKU 类目实时同步配置表；普通成员可使用选项，但不可进入配置表。
+    # 动态选项：SKU 类目来自品类配置；负责人必须来自用户管理表。
+    for table in schemas.values():
+        for field in table.get("fields", []):
+            if field.get("dynamic_options") == "users":
+                field["options"] = _user_options(db)
     for field in schemas["sku"]["fields"]:
         if field.get("key") == "category":
             field["options"] = _category_options(db)

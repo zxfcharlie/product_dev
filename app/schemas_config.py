@@ -99,7 +99,7 @@ TABLE_SCHEMAS = {
         "fields": [
             {"key": "task_type", "label": "任务类型", "type": "select",
              "options": TASK_TYPE_OPTIONS, "required": True},
-            {"key": "assignees", "label": "负责人（按顺序，英文逗号分隔）", "type": "text"},
+            {"key": "assignees", "label": "负责人（可多选，按选择顺序轮流分配）", "type": "multiselect", "options": [], "dynamic_options": "users"},
             {"key": "next_assign_index", "label": "下一个轮到第几位（从0开始，系统自动更新）", "type": "number"},
         ],
     },
@@ -120,7 +120,7 @@ TABLE_SCHEMAS = {
         "fields": [
             {"key": "level1_category", "label": "一级类目", "type": "text", "required": True},
             {"key": "level2_category", "label": "二级类目", "type": "text"},
-            {"key": "responsible_person", "label": "负责人", "type": "text"},
+            {"key": "responsible_person", "label": "负责人", "type": "select", "options": [], "dynamic_options": "users"},
         ],
     },
 }

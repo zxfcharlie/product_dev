@@ -70,9 +70,12 @@ def assign_round_robin(db: Session, task_type_key: str) -> Optional[str]:
         return None
 
     data = dict(config.data or {})
-    raw = str(data.get("assignees") or "")
-    # 兼容英文逗号、中文逗号、分号和换行。
-    assignees = [a.strip() for a in re.split(r"[,，;；\n]+", raw) if a.strip()]
+    raw = data.get("assignees") or []
+    # 新版负责人来自用户管理表，支持多选数组；同时兼容旧版逗号分隔文本。
+    if isinstance(raw, list):
+        assignees = [str(a).strip() for a in raw if str(a).strip()]
+    else:
+        assignees = [a.strip() for a in re.split(r"[,，;；\n]+", str(raw)) if a.strip()]
     if not assignees:
         return None
 

@@ -552,16 +552,34 @@ function renderTable() {
 
     schema.fields.forEach((f) => {
       const td = document.createElement("td");
-      td.innerHTML = renderCell(f, rec.data[f.key]);
-      if (!f.auto) {
-        td.classList.add("editable-cell");
-        td.title = "点击直接编辑";
-        td.onclick = (e) => {
-          if (e.target.closest("a")) return;
-          startInlineEdit(td, rec, f);
-        };
+      // 状态：直接显示下拉框；勾选：直接显示复选框，不需要先点击进入编辑。
+      if (!f.auto && f.type === "select" && f.key === "status") {
+        const select = document.createElement("select");
+        select.className = "cell-direct-select";
+        select.innerHTML = (f.options || []).map((o) => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join("");
+        select.value = rec.data[f.key] || "";
+        select.onchange = () => saveDirectCell(rec, f, select.value);
+        td.appendChild(select);
+      } else if (!f.auto && f.type === "checkbox") {
+        const wrap = document.createElement("label");
+        wrap.className = "cell-direct-check";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = rec.data[f.key] === true || rec.data[f.key] === "true";
+        input.onchange = () => saveDirectCell(rec, f, input.checked);
+        wrap.appendChild(input);
+        wrap.appendChild(document.createTextNode(input.checked ? " 已上架" : " 未上架"));
+        td.appendChild(wrap);
       } else {
-        td.classList.add("readonly-cell");
+        td.innerHTML = renderCell(f, rec.data[f.key]);
+        if (!f.auto) {
+          td.classList.add("editable-cell");
+          td.title = "点击直接编辑";
+          td.onclick = (e) => {
+            if (e.target.closest("a,select,input,label")) return;
+            startInlineEdit(td, rec, f);
+          };
+        } else td.classList.add("readonly-cell");
       }
       row.appendChild(td);
     });
@@ -573,6 +591,20 @@ function renderTable() {
     row.appendChild(action);
     body.appendChild(row);
   });
+}
+
+async function saveDirectCell(rec, field, value) {
+  try {
+    const updated = await api(`/api/tables/${CURRENT_TABLE}/records/${rec.id}`, {
+      method: "PUT",
+      body: JSON.stringify({ data: { [field.key]: value } }),
+    });
+    const pos = RECORDS.findIndex((r) => r.id === rec.id);
+    if (pos >= 0) RECORDS[pos] = updated;
+    await loadRecords();
+  } catch (_) {
+    await loadRecords();
+  }
 }
 
 function inlineEditorFor(field, value) {
