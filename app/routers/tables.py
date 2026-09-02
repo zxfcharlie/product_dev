@@ -9,6 +9,7 @@ from ..database import get_db
 from ..models import Record, SavedView, User
 from ..security import get_current_user
 from ..schemas_config import TABLE_SCHEMAS, get_schema, field_map
+from .. import automation
 
 router = APIRouter(prefix="/api/tables", tags=["tables"])
 
@@ -128,8 +129,25 @@ def create_record(table_key: str, payload: RecordIn, db: Session = Depends(get_d
             clean_data[field["key"]] = datetime.date.today().isoformat()
         if field["type"] == "user" and field.get("auto"):
             clean_data[field["key"]] = user.display_name
+
+    # 二期自动化：新建任务时按配置表自动分配负责人，覆盖表单里可能带的值
+    if table_key in ("ai_creative", "set_task"):
+        assigned = automation.assign_maker_for_create(db, table_key)
+        if assigned:
+            clean_data["maker"] = assigned
+    elif table_key == "pending_listing":
+        assigned = automation.assign_shop_owner_for_create(db, clean_data.get("related_sku"))
+        if assigned:
+            clean_data["shop_owner"] = assigned
+
     record = Record(table_key=table_key, data=clean_data, creator_id=user.id)
     db.add(record)
+    db.flush()
+
+    # 二期自动化：SKU 创建后自动生成 AI 主图二创任务
+    if table_key == "sku":
+        automation.on_sku_created(db, record, user.id)
+
     db.commit()
     db.refresh(record)
     return _serialize(record)
@@ -143,12 +161,22 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
     if not record:
         raise HTTPException(404, "记录不存在")
     fmap = field_map(table_key)
+    previous_data = dict(record.data or {})
     new_data = dict(record.data or {})
     for key, value in payload.data.items():
         field = fmap.get(key)
         if field and not field.get("auto"):
             new_data[key] = value
     record.data = new_data
+
+    # 二期自动化：状态变化时同步 SKU 开发阶段 / 自动生成下游任务
+    if table_key == "ai_creative":
+        automation.on_ai_creative_saved(db, record, previous_data.get("status"), user.id)
+    elif table_key == "set_task":
+        automation.on_set_task_saved(db, record, previous_data.get("status"), user.id)
+    elif table_key == "pending_listing":
+        automation.on_pending_listing_saved(db, record, previous_data.get("is_listed"))
+
     db.commit()
     db.refresh(record)
     return _serialize(record)

@@ -63,13 +63,25 @@ async function init() {
 function renderSidebar(tableKeys) {
   const el = document.getElementById("table-list");
   el.innerHTML = "";
-  tableKeys.forEach((key) => {
-    const div = document.createElement("div");
-    div.className = "table-item" + (key === CURRENT_TABLE ? " active" : "");
-    div.textContent = SCHEMAS[key].label;
-    div.onclick = () => selectTable(key);
-    div.dataset.key = key;
-    el.appendChild(div);
+  const groups = [
+    { key: "business", label: "业务表" },
+    { key: "config", label: "配置表" },
+  ];
+  groups.forEach((g) => {
+    const keysInGroup = tableKeys.filter((k) => (SCHEMAS[k].group || "business") === g.key);
+    if (!keysInGroup.length) return;
+    const header = document.createElement("div");
+    header.className = "sidebar-group-label";
+    header.textContent = g.label;
+    el.appendChild(header);
+    keysInGroup.forEach((key) => {
+      const div = document.createElement("div");
+      div.className = "table-item" + (key === CURRENT_TABLE ? " active" : "");
+      div.textContent = SCHEMAS[key].label;
+      div.onclick = () => selectTable(key);
+      div.dataset.key = key;
+      el.appendChild(div);
+    });
   });
 }
 
@@ -217,7 +229,8 @@ function openRecordModal(id) {
   const form = document.getElementById("record-form");
   form.innerHTML = "";
   schema.fields.forEach((f) => {
-    if (f.auto) return; // 创建时间/创建人 自动填充，不给编辑
+    if (f.auto) return; // 创建时间/创建人/SKU开发阶段 完全由系统生成，不给编辑
+    if (f.auto_on_create && !id) return; // 制作人/店铺负责人 新建时由自动化规则分配，编辑时才允许手动改
     const value = rec ? rec.data[f.key] : undefined;
     form.appendChild(buildFieldInput(f, value));
   });
