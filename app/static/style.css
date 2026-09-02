@@ -72,6 +72,58 @@ table.grid th, table.grid td {
 }
 table.grid th { background: #f7f8fa; position: sticky; top: 0; font-weight: 600; }
 table.grid tr:hover td { background: #fafbfc; }
+.editable-cell { cursor: pointer; }
+.editable-cell:hover { background: #f0f6ff !important; box-shadow: inset 0 0 0 1px #a9c6ff; }
+.editable-cell.editing { padding: 2px !important; background: #fff !important; }
+.cell-clip {
+  display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; vertical-align: middle;
+}
+.cell-input {
+  width: 100%; min-width: 90px; padding: 5px 6px; border: 1px solid #3370ff; border-radius: 4px;
+  font-size: 13px; box-sizing: border-box;
+}
+textarea.cell-input { min-height: 50px; }
+select.cell-input[multiple] { min-height: 70px; }
+.star-cell { cursor: pointer; color: #f7ba1e; }
+.star-cell:hover { transform: scale(1.15); display: inline-block; }
+
+/* ---------- 仪表盘 ---------- */
+.dashboard-view { flex: 1; overflow: auto; padding: 16px; }
+.dash-kpi-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 16px; }
+.dash-kpi {
+  background: #fff; border: 1px solid #e5e6eb; border-radius: 10px; padding: 16px;
+}
+.dash-kpi-label { font-size: 12px; color: #8a8f99; margin-bottom: 8px; }
+.dash-kpi-value { font-size: 28px; font-weight: 700; color: #1f2329; }
+
+.dash-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; align-items: start; }
+
+.dash-pivot-card, .dash-today-card, .dash-chart-card {
+  background: #fff; border: 1px solid #e5e6eb; border-radius: 10px; padding: 16px;
+}
+.dash-pivot-card h4, .dash-today-card h4, .dash-chart-card h4 {
+  margin: 0 0 12px; font-size: 14px; color: #1f2329;
+}
+.dash-pivot-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.dash-pivot-table th, .dash-pivot-table td {
+  border: 1px solid #e5e6eb; padding: 6px 8px; text-align: center;
+}
+.dash-pivot-table th { background: #f7f8fa; }
+.dash-total-row { font-weight: 600; background: #fafbfc; }
+.dash-empty { color: #8a8f99; padding: 16px !important; }
+
+.dash-today-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; text-align: center; }
+.dash-today-value { font-size: 22px; font-weight: 700; color: #3370ff; }
+.dash-today-label { font-size: 11px; color: #8a8f99; margin-top: 4px; }
+
+.dash-chart-card canvas { max-height: 220px; }
+.dash-updated { font-size: 12px; color: #8a8f99; text-align: right; margin-top: 4px; }
+
+@media (max-width: 1100px) {
+  .dash-kpi-row { grid-template-columns: repeat(3, 1fr); }
+  .dash-row { grid-template-columns: 1fr; }
+}
 .col-idx { width: 40px; color: #8a8f99; text-align: center !important; }
 .col-actions a { margin-right: 10px; color: #3370ff; text-decoration: none; font-size: 12px; }
 
@@ -106,22 +158,3 @@ table.grid tr:hover td { background: #fafbfc; }
 
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .hidden { display: none; }
-
-/* ---------- 二期：单元格行内编辑 ---------- */
-.editable-cell { cursor: text; position: relative; }
-.editable-cell:hover { box-shadow: inset 0 0 0 1px #3370ff; background: #f7faff !important; }
-.readonly-cell { background: #fafafa; }
-td.editing { padding: 2px 4px !important; min-width: 140px; }
-.inline-editor {
-  width: 100%; min-width: 120px; padding: 6px 7px; border: 1px solid #3370ff;
-  border-radius: 4px; background: #fff; font: inherit; outline: none;
-}
-select.inline-editor[multiple] { min-width: 180px; }
-textarea.inline-editor { min-height: 64px; resize: vertical; }
-.danger-link { color: #f53f3f !important; }
-.muted { color: #8a8f99; font-size: 12px; }
-
-/* 表格内直接操作：状态下拉和上架勾选 */
-.cell-direct-select { width: 100%; min-width: 96px; border: 1px solid #d0d7de; border-radius: 5px; padding: 5px 7px; background: #fff; }
-.cell-direct-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
-.cell-direct-check input { width: 16px; height: 16px; cursor: pointer; }

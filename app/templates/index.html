@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <title>Etsy 运营任务管理系统</title>
 <link rel="stylesheet" href="/static/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 </head>
 <body>
 <div class="layout">
@@ -23,12 +24,13 @@
       <button class="btn" onclick="openFilterModal()">🔎 筛选 / 排序</button>
       <span id="filter-summary" class="filter-summary"></span>
     </div>
-    <div class="grid-wrap">
+    <div class="grid-wrap" id="grid-wrap">
       <table class="grid" id="grid-table">
         <thead id="grid-head"></thead>
         <tbody id="grid-body"></tbody>
       </table>
     </div>
+    <div id="dashboard-view" class="dashboard-view hidden"></div>
   </main>
 </div>
 

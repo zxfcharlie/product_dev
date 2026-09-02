@@ -1,9 +1,22 @@
-"""二期自动化规则引擎。"""
+"""
+二期自动化规则引擎。
+
+覆盖的规则：
+1. SKU 创建 -> 自动生成一条 AI主图二创任务（制作人按 task_assignee_config 轮询分配），
+   SKU.开发阶段 自动置为「AI主图制作中」。
+2. AI主图任务状态变化 -> 实时同步 SKU.开发阶段；变为「已完成」时自动生成套图任务（幂等，
+   同一条 AI 任务只会触发一次）。
+3. 套图任务状态变化 -> 实时同步 SKU.开发阶段；变为「已完成」时自动生成上架任务
+   （店铺负责人优先按 SKU 品类匹配 category_config，匹配不到则走任务负责人配置表轮询兜底）。
+4. 上架任务「是否已上架」变化 -> 实时同步 SKU.开发阶段（已上架 / 待上架）。
+
+设计上所有自动创建的任务的 “制作人/店铺负责人” 字段都由这里的轮询逻辑决定，
+用户手动新建业务表记录时也会经过这里分配（对应需求里“任务创建的时候默认按顺序分配”）。
+"""
 import datetime
 import re
 from typing import Optional
 from sqlalchemy.orm import Session
-from sqlalchemy.orm.attributes import flag_modified
 
 from .models import Record
 
@@ -12,6 +25,8 @@ TASK_TYPE_LABELS = {
     "set_task": "套图任务",
     "pending_listing": "上架任务",
 }
+
+_SPLIT_RE = re.compile(r"[,，、;；\n]+")  # 兼容英文逗号/中文逗号/顿号/分号/换行，容错用户手误
 
 
 def _all_records(db: Session, table_key: str):
@@ -28,16 +43,15 @@ def find_sku_by_code(db: Session, sku_code: Optional[str]) -> Optional[Record]:
 
 
 def generate_sku_code(db: Session) -> str:
-    """SKU: gzs-yymmdd00001；序号每天从 00001 开始并递增。"""
-    prefix = f"gzs-{datetime.date.today().strftime('%y%m%d')}"
-    max_seq = 0
+    """gzs-yymmdd-00001，按天重置流水号。"""
+    today = datetime.date.today()
+    prefix = f"gzs-{today.strftime('%y%m%d')}-"
+    count = 0
     for r in _all_records(db, "sku"):
-        code = str((r.data or {}).get("sku_code") or "")
+        code = (r.data or {}).get("sku_code") or ""
         if code.startswith(prefix):
-            m = re.fullmatch(re.escape(prefix) + r"(\d{5})", code)
-            if m:
-                max_seq = max(max_seq, int(m.group(1)))
-    return f"{prefix}{max_seq + 1:05d}"
+            count += 1
+    return f"{prefix}{count + 1:05d}"
 
 
 def generate_task_code(db: Session, table_key: str) -> str:
@@ -53,47 +67,48 @@ def generate_task_code(db: Session, table_key: str) -> str:
 
 
 def assign_round_robin(db: Session, task_type_key: str) -> Optional[str]:
-    """按负责人配置顺序轮询，并使用行锁保证多人同时创建任务时也能正确推进。"""
+    """
+    按任务类型做轮询分配。
+
+    容错设计：管理员既可能在“任务负责人配置表”里新建一行、把多个人用逗号写在
+    一个“负责人”字段里，也可能习惯一人一行、建多条同类型的配置记录。
+    这里统一把同一 task_type 下所有配置行的负责人合并成一个有序名单再轮询，
+    轮询指针存在这批配置里 id 最小的那一行上，两种填法都能正确轮流分配。
+    """
     label = TASK_TYPE_LABELS.get(task_type_key)
     if not label:
         return None
-
-    # PostgreSQL JSONB 字段条件 + FOR UPDATE，锁定这一条负责人配置。
-    config = (
-        db.query(Record)
-        .filter(Record.table_key == "task_assignee_config")
-        .filter(Record.data["task_type"].astext == label)
-        .with_for_update()
-        .first()
-    )
-    if not config:
+    configs = [
+        r for r in _all_records(db, "task_assignee_config")
+        if (r.data or {}).get("task_type") == label
+    ]
+    if not configs:
         return None
+    configs.sort(key=lambda r: r.id)
 
-    data = dict(config.data or {})
-    raw = data.get("assignees") or []
-    # 新版负责人来自用户管理表，支持多选数组；同时兼容旧版逗号分隔文本。
-    if isinstance(raw, list):
-        assignees = [str(a).strip() for a in raw if str(a).strip()]
-    else:
-        assignees = [a.strip() for a in re.split(r"[,，;；\n]+", str(raw)) if a.strip()]
+    assignees = []
+    for c in configs:
+        raw = (c.data or {}).get("assignees") or ""
+        assignees.extend([a.strip() for a in _SPLIT_RE.split(raw) if a.strip()])
     if not assignees:
         return None
 
+    pointer_holder = configs[0]
+    data = dict(pointer_holder.data or {})
     try:
         idx = int(data.get("next_assign_index") or 0)
     except (TypeError, ValueError):
         idx = 0
-    idx %= len(assignees)
+    idx = idx % len(assignees)
     chosen = assignees[idx]
     data["next_assign_index"] = (idx + 1) % len(assignees)
-    config.data = data
-    flag_modified(config, "data")
-    db.add(config)
-    db.flush()
+    pointer_holder.data = data
+    db.add(pointer_holder)
     return chosen
 
 
 def resolve_shop_owner_by_category(db: Session, sku_categories) -> Optional[str]:
+    """按 SKU 品类去品类负责人配置表匹配负责人（一级或二级类目命中即可）。"""
     if not sku_categories:
         return None
     if isinstance(sku_categories, str):
@@ -128,15 +143,16 @@ def sync_sku_dev_stage(db: Session, sku_code: Optional[str], dev_stage: str) -> 
         return
     data["dev_stage"] = dev_stage
     sku_record.data = data
-    flag_modified(sku_record, "data")
     db.add(sku_record)
 
 
 def assign_maker_for_create(db: Session, table_key: str) -> Optional[str]:
+    """新建 ai_creative / set_task 记录（无论手动还是自动）时，用来决定“制作人”字段。"""
     return assign_round_robin(db, table_key)
 
 
 def assign_shop_owner_for_create(db: Session, related_sku: Optional[str]) -> Optional[str]:
+    """新建 pending_listing 记录时，用来决定“店铺负责人”字段：先按品类匹配，匹配不到再轮询兜底。"""
     sku_record = find_sku_by_code(db, related_sku)
     sku_categories = (sku_record.data or {}).get("category") if sku_record else None
     owner = resolve_shop_owner_by_category(db, sku_categories)
@@ -150,7 +166,6 @@ def on_sku_created(db: Session, sku_record: Record, creator_id: int) -> None:
     sku_code = data.get("sku_code")
     data["dev_stage"] = "AI主图制作中"
     sku_record.data = data
-    flag_modified(sku_record, "data")
     db.add(sku_record)
 
     ai_data = {
@@ -188,7 +203,6 @@ def on_ai_creative_saved(db: Session, record: Record, previous_status: Optional[
             new_data = dict(data)
             new_data["_spawned_set_task"] = True
             record.data = new_data
-            flag_modified(record, "data")
             db.add(record)
 
 
@@ -215,7 +229,6 @@ def on_set_task_saved(db: Session, record: Record, previous_status: Optional[str
             new_data = dict(data)
             new_data["_spawned_pending"] = True
             record.data = new_data
-            flag_modified(record, "data")
             db.add(record)
 
 

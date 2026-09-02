@@ -5,7 +5,12 @@ let CURRENT_SORTS = [];
 let VIEWS = [];
 let ACTIVE_VIEW_ID = null; // null = 默认 Grid
 let RECORDS = [];
-let EDITING_ID = null;
+let USER_ADMIN_MODE = false;
+let DASHBOARD_MODE = false;
+let DASHBOARD_TIMER = null;
+let DASHBOARD_CHARTS = {};
+const DASHBOARD_REFRESH_MS = 30000; // 每30秒自动刷新一次，做到“实时更新”
+const STATUS_COLS = ["待制作", "制作中", "已完成"];
 
 const OP_LABELS = {
   eq: "等于", neq: "不等于", contains: "包含", gt: ">", gte: ">=",
@@ -51,13 +56,17 @@ async function logout() {
   window.location.href = "/login";
 }
 
+async function refreshSchemas() {
+  SCHEMAS = await api("/api/tables/schemas");
+}
+
 async function init() {
   document.getElementById("user-name").textContent =
     window.CURRENT_USER.display_name + (window.CURRENT_USER.role === "admin" ? "（管理员）" : "");
-  SCHEMAS = await api("/api/tables/schemas");
+  await refreshSchemas();
   const tableKeys = Object.keys(SCHEMAS).sort((a, b) => SCHEMAS[a].order - SCHEMAS[b].order);
   renderSidebar(tableKeys);
-  selectTable(tableKeys[0]);
+  if (tableKeys.length) selectTable(tableKeys[0]);
 }
 
 function renderSidebar(tableKeys) {
@@ -65,7 +74,7 @@ function renderSidebar(tableKeys) {
   el.innerHTML = "";
   const groups = [
     { key: "business", label: "业务表" },
-    { key: "config", label: "配置表" },
+    { key: "config", label: "配置表（管理员）" },
   ];
   groups.forEach((g) => {
     const keysInGroup = tableKeys.filter((k) => (SCHEMAS[k].group || "business") === g.key);
@@ -83,9 +92,43 @@ function renderSidebar(tableKeys) {
       el.appendChild(div);
     });
   });
+
+  if (window.CURRENT_USER.role === "admin") {
+    const header = document.createElement("div");
+    header.className = "sidebar-group-label";
+    header.textContent = "系统管理";
+    el.appendChild(header);
+    const item = document.createElement("div");
+    item.className = "table-item" + (USER_ADMIN_MODE ? " active" : "");
+    item.textContent = "👤 用户管理";
+    item.onclick = () => selectUserAdmin();
+    item.dataset.key = "__user_admin__";
+    el.appendChild(item);
+  }
+
+  const dashHeader = document.createElement("div");
+  dashHeader.className = "sidebar-group-label";
+  dashHeader.textContent = "仪表盘";
+  el.appendChild(dashHeader);
+  const dashItem = document.createElement("div");
+  dashItem.className = "table-item" + (DASHBOARD_MODE ? " active" : "");
+  dashItem.textContent = "📊 每日任务进度仪表盘";
+  dashItem.onclick = () => selectDashboard();
+  dashItem.dataset.key = "__dashboard__";
+  el.appendChild(dashItem);
+}
+
+function resetViewMode() {
+  if (DASHBOARD_TIMER) { clearInterval(DASHBOARD_TIMER); DASHBOARD_TIMER = null; }
+  USER_ADMIN_MODE = false;
+  DASHBOARD_MODE = false;
+  document.getElementById("grid-wrap").classList.remove("hidden");
+  document.getElementById("dashboard-view").classList.add("hidden");
+  document.querySelector(".toolbar").style.display = "flex";
 }
 
 async function selectTable(key) {
+  resetViewMode();
   CURRENT_TABLE = key;
   CURRENT_FILTERS = [];
   CURRENT_SORTS = [];
@@ -161,6 +204,8 @@ function updateFilterSummary() {
     parts.length ? `(${parts.join("，")}) 共 ${RECORDS.length} 条` : `共 ${RECORDS.length} 条`;
 }
 
+// ---------------- 表格渲染 + 点击单元格内联编辑 ----------------
+
 function renderTable() {
   const schema = SCHEMAS[CURRENT_TABLE];
   const head = document.getElementById("grid-head");
@@ -180,36 +225,55 @@ function renderTable() {
     const row = document.createElement("tr");
     let html = `<td class="col-idx">${idx + 1}</td>`;
     schema.fields.forEach((f) => {
-      html += `<td>${renderCell(f, rec.data[f.key])}</td>`;
+      html += renderCellTd(f, rec);
     });
-    html += `<td class="col-actions">
-      <a href="#" onclick="openRecordModal(${rec.id}); return false;">编辑</a>
-      <a href="#" onclick="removeRecord(${rec.id}); return false;">删除</a>
-    </td>`;
+    html += `<td class="col-actions"><a href="#" onclick="removeRecord(${rec.id}); return false;">删除</a></td>`;
     row.innerHTML = html;
     body.appendChild(row);
   });
 }
 
-function renderCell(field, value) {
+function renderCellTd(field, rec) {
+  const value = rec.data[field.key];
+  if (field.type === "checkbox") {
+    const checked = value === true || value === "true";
+    if (field.auto) return `<td>${checked ? "✅" : ""}</td>`;
+    return `<td><input type="checkbox" ${checked ? "checked" : ""}
+      onchange="saveCellValue(${rec.id}, '${field.key}', this.checked)"></td>`;
+  }
+  if (field.type === "rating") {
+    const n = parseInt(value) || 0;
+    let stars = "";
+    for (let i = 1; i <= 5; i++) {
+      const filled = i <= n;
+      stars += field.auto
+        ? `<span class="${filled ? "" : "star-empty"}">${filled ? "★" : "☆"}</span>`
+        : `<span class="star-cell" onclick="saveCellValue(${rec.id}, '${field.key}', ${i})">${filled ? "★" : "☆"}</span>`;
+    }
+    return `<td>${stars}</td>`;
+  }
+  if (field.auto) {
+    return `<td>${renderStaticCell(field, value)}</td>`;
+  }
+  return `<td class="editable-cell" onclick="activateCell(${rec.id}, '${field.key}', this)">${renderStaticCell(field, value)}</td>`;
+}
+
+function renderStaticCell(field, value) {
   if (value === undefined || value === null || value === "") return "";
   switch (field.type) {
     case "url":
-      return `<a href="${escapeHtml(value)}" target="_blank" class="cell-link">${escapeHtml(value)}</a>`;
+      return `<a href="${escapeHtml(value)}" target="_blank" class="cell-link cell-clip"
+        title="${escapeHtml(value)}" onclick="event.stopPropagation()">${escapeHtml(value)}</a>`;
     case "select":
       return `<span class="badge" style="background:${badgeColor(value)}">${escapeHtml(value)}</span>`;
     case "multiselect":
       return (Array.isArray(value) ? value : []).map(
         (v) => `<span class="badge" style="background:${badgeColor(v)}">${escapeHtml(v)}</span>`
       ).join(" ");
-    case "rating": {
-      const n = parseInt(value) || 0;
-      return "★".repeat(n) + `<span class="star-empty">${"★".repeat(5 - n)}</span>`;
+    default: {
+      const text = escapeHtml(String(value));
+      return `<span class="cell-clip" title="${text}">${text}</span>`;
     }
-    case "checkbox":
-      return value === true || value === "true" ? "✅" : "";
-    default:
-      return escapeHtml(String(value));
   }
 }
 
@@ -219,20 +283,111 @@ function escapeHtml(s) {
   }[c]));
 }
 
-// ---------------- 记录增改 ----------------
-
-function openRecordModal(id) {
-  EDITING_ID = id || null;
+async function activateCell(recordId, fieldKey, tdEl) {
+  if (tdEl.classList.contains("editing")) return;
   const schema = SCHEMAS[CURRENT_TABLE];
-  const rec = id ? RECORDS.find((r) => r.id === id) : null;
-  document.getElementById("record-modal-title").textContent = id ? "编辑记录" : "添加记录";
+  const field = schema.fields.find((f) => f.key === fieldKey);
+  if (!field || field.auto) return;
+
+  // select / multiselect 的可选项可能来自配置表，进编辑前刷新一次，保证选项是最新的
+  if (field.type === "select" || field.type === "multiselect") {
+    await refreshSchemas();
+  }
+  const freshField = SCHEMAS[CURRENT_TABLE].fields.find((f) => f.key === fieldKey);
+  const rec = RECORDS.find((r) => r.id === recordId);
+  const value = rec.data[fieldKey];
+
+  tdEl.classList.add("editing");
+  tdEl.innerHTML = "";
+  let input;
+
+  if (freshField.type === "select") {
+    input = document.createElement("select");
+    input.innerHTML = `<option value="">-- 未设置 --</option>` +
+      (freshField.options || []).map((o) => `<option value="${o}" ${o === value ? "selected" : ""}>${o}</option>`).join("");
+    input.onchange = () => input.blur();
+    input.onblur = () => finishCellEdit(recordId, fieldKey, tdEl, input.value);
+  } else if (freshField.type === "multiselect") {
+    input = document.createElement("select");
+    input.multiple = true;
+    input.size = Math.min(6, Math.max(3, (freshField.options || []).length));
+    const selected = Array.isArray(value) ? value : [];
+    input.innerHTML = (freshField.options || []).map(
+      (o) => `<option value="${o}" ${selected.includes(o) ? "selected" : ""}>${o}</option>`
+    ).join("");
+    input.onblur = () => {
+      const vals = [...input.selectedOptions].map((o) => o.value);
+      finishCellEdit(recordId, fieldKey, tdEl, vals);
+    };
+  } else if (freshField.type === "long_text") {
+    input = document.createElement("textarea");
+    input.value = value || "";
+    input.onblur = () => finishCellEdit(recordId, fieldKey, tdEl, input.value);
+    input.onkeydown = (e) => { if (e.key === "Escape") { tdEl.classList.remove("editing"); renderTable(); } };
+  } else if (freshField.type === "number") {
+    input = document.createElement("input");
+    input.type = "number";
+    input.value = value ?? "";
+    input.onblur = () => finishCellEdit(recordId, fieldKey, tdEl, input.value);
+    input.onkeydown = (e) => {
+      if (e.key === "Enter") input.blur();
+      if (e.key === "Escape") { tdEl.classList.remove("editing"); renderTable(); }
+    };
+  } else if (freshField.type === "date") {
+    input = document.createElement("input");
+    input.type = "date";
+    input.value = value || "";
+    input.onblur = () => finishCellEdit(recordId, fieldKey, tdEl, input.value);
+    input.onchange = () => input.blur();
+  } else {
+    input = document.createElement("input");
+    input.type = "text";
+    input.value = value || "";
+    input.onblur = () => finishCellEdit(recordId, fieldKey, tdEl, input.value);
+    input.onkeydown = (e) => {
+      if (e.key === "Enter") input.blur();
+      if (e.key === "Escape") { tdEl.classList.remove("editing"); renderTable(); }
+    };
+  }
+  input.className = "cell-input";
+  tdEl.appendChild(input);
+  input.focus();
+  if (input.select) input.select();
+}
+
+async function finishCellEdit(recordId, fieldKey, tdEl, newValue) {
+  tdEl.classList.remove("editing");
+  await saveCellValue(recordId, fieldKey, newValue);
+}
+
+async function saveCellValue(recordId, fieldKey, value) {
+  await api(`/api/tables/${CURRENT_TABLE}/records/${recordId}`, {
+    method: "PUT", body: JSON.stringify({ data: { [fieldKey]: value } }),
+  });
+  await loadRecords();
+}
+
+async function removeRecord(id) {
+  if (!confirm("确定删除这条记录吗？")) return;
+  await api(`/api/tables/${CURRENT_TABLE}/records/${id}`, { method: "DELETE" });
+  await loadRecords();
+}
+
+function closeModal(id) {
+  document.getElementById(id).classList.add("hidden");
+}
+
+// ---------------- 添加记录（新建走弹窗，编辑走点单元格） ----------------
+
+async function openRecordModal() {
+  await refreshSchemas();
+  const schema = SCHEMAS[CURRENT_TABLE];
   const form = document.getElementById("record-form");
   form.innerHTML = "";
   schema.fields.forEach((f) => {
-    if (f.auto) return; // 创建时间/创建人/SKU开发阶段 完全由系统生成，不给编辑
-    if (f.auto_on_create && !id) return; // 制作人/店铺负责人 新建时由自动化规则分配，编辑时才允许手动改
-    const value = rec ? rec.data[f.key] : undefined;
-    form.appendChild(buildFieldInput(f, value));
+    if (f.auto) return;          // 完全自动生成的字段，新建时不出现
+    if (f.auto_on_create) return; // 由自动化规则分配的字段，新建时不出现，建完后可点单元格改
+    form.appendChild(buildFieldInput(f, undefined));
   });
   document.getElementById("record-modal").classList.remove("hidden");
 }
@@ -274,6 +429,10 @@ function buildFieldInput(f, value) {
     input = document.createElement("input");
     input.type = "number";
     input.value = value ?? "";
+  } else if (f.type === "date") {
+    input = document.createElement("input");
+    input.type = "date";
+    input.value = value || "";
   } else {
     input = document.createElement("input");
     input.type = "text";
@@ -320,27 +479,11 @@ function collectFormData() {
 
 async function submitRecord() {
   const data = collectFormData();
-  if (EDITING_ID) {
-    await api(`/api/tables/${CURRENT_TABLE}/records/${EDITING_ID}`, {
-      method: "PUT", body: JSON.stringify({ data }),
-    });
-  } else {
-    await api(`/api/tables/${CURRENT_TABLE}/records`, {
-      method: "POST", body: JSON.stringify({ data }),
-    });
-  }
+  await api(`/api/tables/${CURRENT_TABLE}/records`, {
+    method: "POST", body: JSON.stringify({ data }),
+  });
   closeModal("record-modal");
   await loadRecords();
-}
-
-async function removeRecord(id) {
-  if (!confirm("确定删除这条记录吗？")) return;
-  await api(`/api/tables/${CURRENT_TABLE}/records/${id}`, { method: "DELETE" });
-  await loadRecords();
-}
-
-function closeModal(id) {
-  document.getElementById(id).classList.add("hidden");
 }
 
 // ---------------- 筛选 / 排序 ----------------
@@ -468,304 +611,202 @@ async function saveAsView() {
   await loadRecords();
 }
 
-init();
+// ---------------- 用户管理（仅管理员） ----------------
 
-// ==================== 二期增强：权限 / 行内编辑 / 用户管理 ====================
-
-function renderSidebar(tableKeys) {
-  const el = document.getElementById("table-list");
-  el.innerHTML = "";
-  const groups = [
-    { key: "business", label: "业务表" },
-    { key: "config", label: "配置表" },
-  ];
-  groups.forEach((g) => {
-    const keysInGroup = tableKeys.filter((k) => (SCHEMAS[k].group || "business") === g.key);
-    if (!keysInGroup.length) return;
-    const header = document.createElement("div");
-    header.className = "sidebar-group-label";
-    header.textContent = g.label;
-    el.appendChild(header);
-    keysInGroup.forEach((key) => {
-      const div = document.createElement("div");
-      div.className = "table-item" + (key === CURRENT_TABLE ? " active" : "");
-      div.textContent = SCHEMAS[key].label;
-      div.onclick = () => selectTable(key);
-      div.dataset.key = key;
-      el.appendChild(div);
-    });
-  });
-
-  if (window.CURRENT_USER.role === "admin") {
-    const header = document.createElement("div");
-    header.className = "sidebar-group-label";
-    header.textContent = "系统管理";
-    el.appendChild(header);
-    const div = document.createElement("div");
-    div.className = "table-item" + (CURRENT_TABLE === "__users__" ? " active" : "");
-    div.textContent = "👥 用户管理";
-    div.dataset.key = "__users__";
-    div.onclick = showUserManagement;
-    el.appendChild(div);
-  }
+async function selectUserAdmin() {
+  resetViewMode();
+  USER_ADMIN_MODE = true;
+  CURRENT_TABLE = null;
+  document.querySelectorAll(".table-item").forEach((d) => d.classList.toggle("active", d.dataset.key === "__user_admin__"));
+  document.getElementById("view-tabs").innerHTML = '<div class="view-tab active">用户管理</div>';
+  document.getElementById("filter-summary").textContent = "";
+  document.querySelector(".toolbar").style.display = "none";
+  const users = await api("/api/admin/users");
+  renderUserAdminTable(users);
 }
 
-async function selectTable(key) {
-  if (key === "sku") {
-    SCHEMAS = await api("/api/tables/schemas");
-    const keys = Object.keys(SCHEMAS).sort((a, b) => SCHEMAS[a].order - SCHEMAS[b].order);
-    renderSidebar(keys);
-  }
-  CURRENT_TABLE = key;
-  CURRENT_FILTERS = [];
-  CURRENT_SORTS = [];
-  ACTIVE_VIEW_ID = null;
-  document.querySelectorAll(".table-item").forEach((d) => {
-    d.classList.toggle("active", d.dataset.key === key);
-  });
-  document.querySelector(".toolbar").classList.remove("hidden");
-  document.getElementById("view-tabs").classList.remove("hidden");
-  await loadViews();
-  renderViewTabs();
-  await loadRecords();
-}
-
-function renderTable() {
-  const schema = SCHEMAS[CURRENT_TABLE];
+function renderUserAdminTable(users) {
   const head = document.getElementById("grid-head");
   const body = document.getElementById("grid-body");
-  head.innerHTML = "";
+  head.innerHTML = `<tr>
+    <th class="col-idx">#</th><th>用户名</th><th>姓名</th><th>角色</th>
+    <th>备注</th><th>创建时间</th><th class="col-actions">操作</th>
+  </tr>`;
   body.innerHTML = "";
-
-  const tr = document.createElement("tr");
-  tr.innerHTML = "<th class='col-idx'>#</th>";
-  schema.fields.forEach((f) => { tr.innerHTML += `<th>${f.label}</th>`; });
-  tr.innerHTML += "<th class='col-actions'>操作</th>";
-  head.appendChild(tr);
-
-  RECORDS.forEach((rec, idx) => {
+  users.forEach((u, idx) => {
     const row = document.createElement("tr");
-    const indexCell = document.createElement("td");
-    indexCell.className = "col-idx";
-    indexCell.textContent = idx + 1;
-    row.appendChild(indexCell);
-
-    schema.fields.forEach((f) => {
-      const td = document.createElement("td");
-      // 状态：直接显示下拉框；勾选：直接显示复选框，不需要先点击进入编辑。
-      if (!f.auto && f.type === "select" && f.key === "status") {
-        const select = document.createElement("select");
-        select.className = "cell-direct-select";
-        select.innerHTML = (f.options || []).map((o) => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join("");
-        select.value = rec.data[f.key] || "";
-        select.onchange = () => saveDirectCell(rec, f, select.value);
-        td.appendChild(select);
-      } else if (!f.auto && f.type === "checkbox") {
-        const wrap = document.createElement("label");
-        wrap.className = "cell-direct-check";
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.checked = rec.data[f.key] === true || rec.data[f.key] === "true";
-        input.onchange = () => saveDirectCell(rec, f, input.checked);
-        wrap.appendChild(input);
-        wrap.appendChild(document.createTextNode(input.checked ? " 已上架" : " 未上架"));
-        td.appendChild(wrap);
-      } else {
-        td.innerHTML = renderCell(f, rec.data[f.key]);
-        if (!f.auto) {
-          td.classList.add("editable-cell");
-          td.title = "点击直接编辑";
-          td.onclick = (e) => {
-            if (e.target.closest("a,select,input,label")) return;
-            startInlineEdit(td, rec, f);
-          };
-        } else td.classList.add("readonly-cell");
-      }
-      row.appendChild(td);
-    });
-
-    const action = document.createElement("td");
-    action.className = "col-actions";
-    action.innerHTML = `<a href="#" onclick="openRecordModal(${rec.id}); return false;">编辑</a>
-      <a href="#" onclick="removeRecord(${rec.id}); return false;">删除</a>`;
-    row.appendChild(action);
+    const roleBadge = u.role === "admin"
+      ? `<span class="badge" style="background:#ffe8cc">管理员</span>`
+      : `<span class="badge" style="background:#e5f3ff">成员</span>`;
+    row.innerHTML = `
+      <td class="col-idx">${idx + 1}</td>
+      <td>${escapeHtml(u.username)}</td>
+      <td>${escapeHtml(u.display_name)}</td>
+      <td>${roleBadge}</td>
+      <td class="editable-cell" onclick="activateUserNoteCell(${u.id}, this)">${escapeHtml(u.note || "")}</td>
+      <td>${u.created_at ? u.created_at.split("T")[0] : ""}</td>
+      <td class="col-actions"><a href="#" onclick="removeUser(${u.id}); return false;">删除</a></td>
+    `;
     body.appendChild(row);
   });
 }
 
-async function saveDirectCell(rec, field, value) {
-  try {
-    const updated = await api(`/api/tables/${CURRENT_TABLE}/records/${rec.id}`, {
-      method: "PUT",
-      body: JSON.stringify({ data: { [field.key]: value } }),
-    });
-    const pos = RECORDS.findIndex((r) => r.id === rec.id);
-    if (pos >= 0) RECORDS[pos] = updated;
-    await loadRecords();
-  } catch (_) {
-    await loadRecords();
-  }
-}
-
-function inlineEditorFor(field, value) {
-  let el;
-  if (field.type === "select") {
-    el = document.createElement("select");
-    el.innerHTML = `<option value="">-- 未设置 --</option>` +
-      (field.options || []).map((o) => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join("");
-    el.value = value || "";
-  } else if (field.type === "multiselect") {
-    el = document.createElement("select");
-    el.multiple = true;
-    el.size = Math.min(Math.max((field.options || []).length, 2), 7);
-    const selected = Array.isArray(value) ? value : [];
-    (field.options || []).forEach((o) => {
-      const op = document.createElement("option");
-      op.value = o;
-      op.textContent = o;
-      op.selected = selected.includes(o);
-      el.appendChild(op);
-    });
-  } else if (field.type === "checkbox") {
-    el = document.createElement("input");
-    el.type = "checkbox";
-    el.checked = value === true || value === "true";
-  } else if (field.type === "rating") {
-    el = document.createElement("select");
-    el.innerHTML = [0,1,2,3,4,5].map((n) => `<option value="${n}">${n === 0 ? "未设置" : "★".repeat(n)}</option>`).join("");
-    el.value = parseInt(value) || 0;
-  } else {
-    el = document.createElement(field.type === "long_text" ? "textarea" : "input");
-    if (el.tagName === "INPUT") {
-      if (field.type === "number") el.type = "number";
-      else if (field.type === "date") el.type = "date";
-      else el.type = "text";
-    }
-    el.value = value ?? "";
-  }
-  el.classList.add("inline-editor");
-  return el;
-}
-
-function inlineValue(field, el) {
-  if (field.type === "multiselect") return [...el.selectedOptions].map((o) => o.value);
-  if (field.type === "checkbox") return el.checked;
-  if (field.type === "rating") return parseInt(el.value) || 0;
-  return el.value;
-}
-
-function startInlineEdit(td, rec, field) {
+function activateUserNoteCell(userId, td) {
   if (td.classList.contains("editing")) return;
+  const current = td.textContent;
   td.classList.add("editing");
-  const oldHtml = td.innerHTML;
-  const editor = inlineEditorFor(field, rec.data[field.key]);
   td.innerHTML = "";
-  td.appendChild(editor);
-  editor.focus();
-
-  let saving = false;
-  const cancel = () => {
-    if (saving) return;
-    td.classList.remove("editing");
-    td.innerHTML = oldHtml;
-  };
-  const save = async () => {
-    if (saving) return;
-    saving = true;
-    try {
-      const value = inlineValue(field, editor);
-      const updated = await api(`/api/tables/${CURRENT_TABLE}/records/${rec.id}`, {
-        method: "PUT",
-        body: JSON.stringify({ data: { [field.key]: value } }),
-      });
-      const pos = RECORDS.findIndex((r) => r.id === rec.id);
-      if (pos >= 0) RECORDS[pos] = updated;
-      td.classList.remove("editing");
-      td.innerHTML = renderCell(field, updated.data[field.key]);
-      // 状态字段变更可能自动生成下游任务或同步其他表，因此刷新当前表。
-      if (["status", "is_listed"].includes(field.key)) await loadRecords();
-    } catch (_) {
-      saving = false;
-      cancel();
-    }
-  };
-
-  editor.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { e.preventDefault(); cancel(); }
-    if (e.key === "Enter" && field.type !== "long_text" && field.type !== "multiselect") {
-      e.preventDefault(); save();
-    }
-  });
-  if (field.type === "select" || field.type === "checkbox" || field.type === "rating") {
-    editor.addEventListener("change", save, { once: true });
-  } else {
-    editor.addEventListener("blur", save, { once: true });
-  }
-  if (field.type === "multiselect") {
-    editor.addEventListener("blur", save, { once: true });
-  }
-}
-
-async function showUserManagement() {
-  if (window.CURRENT_USER.role !== "admin") return;
-  CURRENT_TABLE = "__users__";
-  document.querySelectorAll(".table-item").forEach((d) => {
-    d.classList.toggle("active", d.dataset.key === "__users__");
-  });
-  document.querySelector(".toolbar").classList.add("hidden");
-  document.getElementById("view-tabs").classList.add("hidden");
-  const users = await api("/api/auth/users");
-  renderUsersTable(users);
-}
-
-function renderUsersTable(users) {
-  const head = document.getElementById("grid-head");
-  const body = document.getElementById("grid-body");
-  head.innerHTML = `<tr><th>#</th><th>用户名</th><th>显示名称</th><th>角色</th><th>备注</th><th>创建时间</th><th>操作</th></tr>`;
-  body.innerHTML = "";
-  users.forEach((u, i) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td class="col-idx">${i + 1}</td>
-      <td>${escapeHtml(u.username)}</td>
-      <td>${escapeHtml(u.display_name)}</td>
-      <td>${u.role === "admin" ? "管理员" : "成员"}</td>
-      <td class="user-note-cell editable-cell" title="点击编辑备注">${escapeHtml(u.note || "")}</td>
-      <td>${u.created_at ? escapeHtml(u.created_at.slice(0, 10)) : ""}</td>
-      <td class="col-actions">${u.id === window.CURRENT_USER.id ? '<span class="muted">当前账号</span>' : `<a href="#" class="danger-link">删除</a>`}</td>`;
-    const noteCell = tr.querySelector(".user-note-cell");
-    noteCell.onclick = () => editUserNote(noteCell, u);
-    const del = tr.querySelector(".danger-link");
-    if (del) del.onclick = (e) => { e.preventDefault(); deleteManagedUser(u.id, u.display_name); };
-    body.appendChild(tr);
-  });
-}
-
-function editUserNote(td, user) {
-  if (td.classList.contains("editing")) return;
-  td.classList.add("editing");
   const input = document.createElement("input");
   input.type = "text";
-  input.className = "inline-editor";
-  input.value = user.note || "";
-  td.innerHTML = "";
+  input.className = "cell-input";
+  input.value = current;
+  input.onblur = async () => {
+    td.classList.remove("editing");
+    await api(`/api/admin/users/${userId}/note`, {
+      method: "PUT", body: JSON.stringify({ note: input.value }),
+    });
+    const users = await api("/api/admin/users");
+    renderUserAdminTable(users);
+  };
+  input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); };
   td.appendChild(input);
   input.focus();
-  const save = async () => {
-    const note = input.value;
-    await api(`/api/auth/users/${user.id}/note`, { method: "PUT", body: JSON.stringify({ note }) });
-    user.note = note;
-    td.classList.remove("editing");
-    td.textContent = note;
-  };
-  input.onkeydown = (e) => {
-    if (e.key === "Enter") { e.preventDefault(); save(); }
-    if (e.key === "Escape") { td.classList.remove("editing"); td.textContent = user.note || ""; }
-  };
-  input.onblur = save;
+  input.select();
 }
 
-async function deleteManagedUser(id, name) {
-  if (!confirm(`确定删除用户「${name}」吗？`)) return;
-  await api(`/api/auth/users/${id}`, { method: "DELETE" });
-  await showUserManagement();
+async function removeUser(userId) {
+  if (!confirm("确定删除这个用户吗？此操作不可恢复。")) return;
+  await api(`/api/admin/users/${userId}`, { method: "DELETE" });
+  const users = await api("/api/admin/users");
+  renderUserAdminTable(users);
 }
+
+// ---------------- 仪表盘 ----------------
+
+async function selectDashboard() {
+  resetViewMode();
+  DASHBOARD_MODE = true;
+  CURRENT_TABLE = null;
+  document.querySelectorAll(".table-item").forEach((d) => d.classList.toggle("active", d.dataset.key === "__dashboard__"));
+  document.getElementById("view-tabs").innerHTML = '<div class="view-tab active">📊 每日任务进度仪表盘</div>';
+  document.getElementById("filter-summary").textContent = "";
+  document.querySelector(".toolbar").style.display = "none";
+  document.getElementById("grid-wrap").classList.add("hidden");
+  document.getElementById("dashboard-view").classList.remove("hidden");
+  await loadDashboard();
+  DASHBOARD_TIMER = setInterval(loadDashboard, DASHBOARD_REFRESH_MS);
+}
+
+async function loadDashboard() {
+  const data = await api("/api/dashboard/summary");
+  renderDashboard(data);
+}
+
+function renderDashboard(d) {
+  const el = document.getElementById("dashboard-view");
+  const t = d.totals;
+  el.innerHTML = `
+    <div class="dash-kpi-row">
+      ${kpiCard("AI主图二创任务总数", t.ai_creative.total)}
+      ${kpiCard("AI主图二创已完成任务数", t.ai_creative.done)}
+      ${kpiCard("套图任务总数", t.set_task.total)}
+      ${kpiCard("套图任务已完成数", t.set_task.done)}
+      ${kpiCard("待上架任务总数", t.pending_listing.total)}
+      ${kpiCard("已上架任务数", t.pending_listing.listed)}
+    </div>
+
+    <div class="dash-row">
+      ${statusPivotTable("AI主图二创人员任务完成情况统计", "制作人", d.by_maker.ai_creative)}
+      ${statusPivotTable("套图任务人员任务完成情况统计", "制作人", d.by_maker.set_task)}
+      ${boolPivotTable("待上架任务人员任务完成情况统计", "店铺负责人", d.by_owner.pending_listing)}
+    </div>
+
+    <div class="dash-row">
+      ${todayCardGroup("AI主图二创", d.today.ai_creative)}
+      ${todayCardGroup("套图任务", d.today.set_task)}
+      ${todayCardGroup("待上架任务", d.today.pending_listing)}
+    </div>
+
+    <div class="dash-row">
+      <div class="dash-chart-card"><h4>AI主图二创任务状态分布</h4><canvas id="chart-ai"></canvas></div>
+      <div class="dash-chart-card"><h4>套图任务状态分布</h4><canvas id="chart-set"></canvas></div>
+      <div class="dash-chart-card"><h4>待上架任务状态分布</h4><canvas id="chart-pending"></canvas></div>
+    </div>
+
+    <div class="dash-updated">最近更新：${new Date(d.generated_at + "Z").toLocaleString("zh-CN")}（每 30 秒自动刷新）</div>
+  `;
+  renderPie("chart-ai", d.status_distribution.ai_creative);
+  renderPie("chart-set", d.status_distribution.set_task);
+  renderPie("chart-pending", d.status_distribution.pending_listing);
+}
+
+function kpiCard(label, value) {
+  return `<div class="dash-kpi"><div class="dash-kpi-label">${label}</div><div class="dash-kpi-value">${value}</div></div>`;
+}
+
+function statusPivotTable(title, groupLabel, rows) {
+  const head = `<th>${groupLabel}</th>` + STATUS_COLS.map((c) => `<th>${c}</th>`).join("") + `<th>总计</th>`;
+  let body = rows.map((r) =>
+    `<tr><td>${escapeHtml(r.name)}</td>${STATUS_COLS.map((c) => `<td>${r[c] || 0}</td>`).join("")}<td>${r.total}</td></tr>`
+  ).join("");
+  if (!rows.length) {
+    body = `<tr><td colspan="${STATUS_COLS.length + 2}" class="dash-empty">暂无数据</td></tr>`;
+  } else {
+    const totals = STATUS_COLS.map((c) => rows.reduce((s, r) => s + (r[c] || 0), 0));
+    const grand = rows.reduce((s, r) => s + r.total, 0);
+    body += `<tr class="dash-total-row"><td>总计</td>${totals.map((v) => `<td>${v}</td>`).join("")}<td>${grand}</td></tr>`;
+  }
+  return `<div class="dash-pivot-card"><h4>${title}</h4>
+    <table class="dash-pivot-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function boolPivotTable(title, groupLabel, rows) {
+  const head = `<th>${groupLabel}</th><th>未上架</th><th>已上架</th><th>总计</th>`;
+  let body = rows.map((r) =>
+    `<tr><td>${escapeHtml(r.name)}</td><td>${r.false}</td><td>${r.true}</td><td>${r.total}</td></tr>`
+  ).join("");
+  if (!rows.length) {
+    body = `<tr><td colspan="4" class="dash-empty">暂无数据</td></tr>`;
+  } else {
+    const totalFalse = rows.reduce((s, r) => s + r.false, 0);
+    const totalTrue = rows.reduce((s, r) => s + r.true, 0);
+    body += `<tr class="dash-total-row"><td>总计</td><td>${totalFalse}</td><td>${totalTrue}</td><td>${totalFalse + totalTrue}</td></tr>`;
+  }
+  return `<div class="dash-pivot-card"><h4>${title}</h4>
+    <table class="dash-pivot-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function todayCardGroup(title, stats) {
+  return `<div class="dash-today-card">
+    <h4>${title}</h4>
+    <div class="dash-today-grid">
+      <div><div class="dash-today-value">${stats.current}</div><div class="dash-today-label">当前未完成</div></div>
+      <div><div class="dash-today-value">${stats.completed_today}</div><div class="dash-today-label">今日完成</div></div>
+      <div><div class="dash-today-value">${stats.created_yesterday}</div><div class="dash-today-label">昨日新增</div></div>
+      <div><div class="dash-today-value">${stats.completed_yesterday}</div><div class="dash-today-label">昨日完成</div></div>
+    </div>
+  </div>`;
+}
+
+function badgeColorSolid(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue}, 65%, 55%)`;
+}
+
+function renderPie(canvasId, distMap) {
+  const ctx = document.getElementById(canvasId);
+  if (!ctx || typeof Chart === "undefined") return;
+  if (DASHBOARD_CHARTS[canvasId]) DASHBOARD_CHARTS[canvasId].destroy();
+  const labels = Object.keys(distMap).filter((k) => distMap[k] > 0);
+  const values = labels.map((l) => distMap[l]);
+  if (!labels.length) return;
+  DASHBOARD_CHARTS[canvasId] = new Chart(ctx, {
+    type: "pie",
+    data: { labels, datasets: [{ data: values, backgroundColor: labels.map(badgeColorSolid) }] },
+    options: { plugins: { legend: { position: "bottom" } }, responsive: true, maintainAspectRatio: true },
+  });
+}
+
+init();

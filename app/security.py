@@ -58,3 +58,9 @@ def get_current_user_optional(request: Request, db: Session = Depends(get_db)):
     if not payload:
         return None
     return db.query(User).filter(User.id == payload.get("uid")).first()
+
+
+def require_admin(user: User = Depends(get_current_user)) -> User:
+    if user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可操作")
+    return user

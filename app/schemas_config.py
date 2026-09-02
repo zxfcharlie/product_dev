@@ -14,8 +14,9 @@
 #   user        创建人（自动取当前登录用户）
 #
 # 字段控制标记：
-#   auto            完全由系统生成，编辑/新建表单里都不出现（如创建时间、创建人、SKU开发阶段）
-#   auto_on_create  新建时不出现（由自动化规则填入），但编辑时可以手动修改（如制作人/店铺负责人）
+#   auto            完全由系统生成，编辑/新建表单里都不出现（如创建时间、创建人、SKU编号、SKU开发阶段）
+#   auto_on_create  新建时不出现（由自动化规则填入），但可以在表格里点击单元格手动改（如制作人/店铺负责人）
+#   dynamic_options 该字段的可选项不是写死的，而是实时从某张配置表读取（如 SKU 商品类目 同步自 品类负责人配置表）
 #
 # group：业务表(business) 会在左侧菜单单独分组显示；配置表(config) 是二期新增的自动化规则数据源。
 
@@ -29,7 +30,8 @@ TABLE_SCHEMAS = {
         "fields": [
             {"key": "sku_code", "label": "SKU编号", "type": "text", "auto": True},
             {"key": "category", "label": "商品类目", "type": "multiselect",
-             "options": [], "dynamic_options": "category_config"},
+             "options": ["数字产品", "油画", "数字印刷画", "数字油画"],
+             "dynamic_options": {"table": "category_config", "fields": ["level1_category", "level2_category"]}},
             {"key": "competitor_link", "label": "竞品链接", "type": "url"},
             {"key": "design_highlight", "label": "设计亮点", "type": "text"},
             {"key": "dev_stage", "label": "开发阶段", "type": "select", "auto": True,
@@ -99,7 +101,7 @@ TABLE_SCHEMAS = {
         "fields": [
             {"key": "task_type", "label": "任务类型", "type": "select",
              "options": TASK_TYPE_OPTIONS, "required": True},
-            {"key": "assignees", "label": "负责人（可多选，按选择顺序轮流分配）", "type": "multiselect", "options": [], "dynamic_options": "users"},
+            {"key": "assignees", "label": "负责人（按顺序，英文逗号分隔）", "type": "text"},
             {"key": "next_assign_index", "label": "下一个轮到第几位（从0开始，系统自动更新）", "type": "number"},
         ],
     },
@@ -120,7 +122,7 @@ TABLE_SCHEMAS = {
         "fields": [
             {"key": "level1_category", "label": "一级类目", "type": "text", "required": True},
             {"key": "level2_category", "label": "二级类目", "type": "text"},
-            {"key": "responsible_person", "label": "负责人", "type": "select", "options": [], "dynamic_options": "users"},
+            {"key": "responsible_person", "label": "负责人", "type": "text"},
         ],
     },
 }
