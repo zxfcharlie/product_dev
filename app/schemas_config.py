@@ -132,6 +132,30 @@ TABLE_SCHEMAS = {
 }
 
 
+# ---------------- 三期：历史归档表（只读） ----------------
+# 满 200 个已上架 SKU 后，系统会自动把最早上架的一批 SKU、以及它们在各任务表里的
+# 相关记录，搬到下面这几张“历史-xxx”表里（不再出现在日常工作表里，减少活跃表的查询压力），
+# 只留最近一批在工作表里继续用。历史表只能查询，不能新增/编辑/删除。
+_ARCHIVE_SOURCE_TABLES = ["sku", "ai_creative", "set_task", "pending_listing"]
+ARCHIVE_TABLE_KEYS = {f"archive_{k}" for k in _ARCHIVE_SOURCE_TABLES}
+
+
+def _build_archive_fields(source_fields):
+    fields = [dict(f) for f in source_fields]
+    fields.append({"key": "archived_at", "label": "归档时间", "type": "date", "auto": True})
+    return fields
+
+
+for _idx, _src_key in enumerate(_ARCHIVE_SOURCE_TABLES):
+    _src = TABLE_SCHEMAS[_src_key]
+    TABLE_SCHEMAS[f"archive_{_src_key}"] = {
+        "label": f"🗄 历史-{_src['label'].split('. ', 1)[-1]}",
+        "order": 20 + _idx,
+        "group": "archive",
+        "fields": _build_archive_fields(_src["fields"]),
+    }
+
+
 def get_schema(table_key: str):
     return TABLE_SCHEMAS.get(table_key)
 

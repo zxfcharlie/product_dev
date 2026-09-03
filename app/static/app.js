@@ -75,6 +75,7 @@ function renderSidebar(tableKeys) {
   const groups = [
     { key: "business", label: "业务表" },
     { key: "config", label: "配置表（管理员）" },
+    { key: "archive", label: "历史归档（只读）" },
   ];
   groups.forEach((g) => {
     const keysInGroup = tableKeys.filter((k) => (SCHEMAS[k].group || "business") === g.key);
@@ -136,6 +137,9 @@ async function selectTable(key) {
   document.querySelectorAll(".table-item").forEach((d) => {
     d.classList.toggle("active", d.dataset.key === key);
   });
+  const isArchive = SCHEMAS[key].group === "archive";
+  const addBtn = document.getElementById("add-record-btn");
+  if (addBtn) addBtn.style.display = isArchive ? "none" : "";
   await loadViews();
   renderViewTabs();
   await loadRecords();
@@ -209,6 +213,7 @@ function updateFilterSummary() {
 
 function renderTable() {
   const schema = SCHEMAS[CURRENT_TABLE];
+  const isArchive = schema.group === "archive";
   const head = document.getElementById("grid-head");
   const body = document.getElementById("grid-body");
   head.innerHTML = "";
@@ -226,16 +231,21 @@ function renderTable() {
     const row = document.createElement("tr");
     let html = `<td class="col-idx">${idx + 1}</td>`;
     schema.fields.forEach((f) => {
-      html += renderCellTd(f, rec);
+      html += renderCellTd(f, rec, isArchive);
     });
-    html += `<td class="col-actions"><a href="#" onclick="removeRecord(${rec.id}); return false;">删除</a></td>`;
+    html += isArchive
+      ? `<td class="col-actions dash-empty">只读</td>`
+      : `<td class="col-actions"><a href="#" onclick="removeRecord(${rec.id}); return false;">删除</a></td>`;
     row.innerHTML = html;
     body.appendChild(row);
   });
 }
 
-function renderCellTd(field, rec) {
+function renderCellTd(field, rec, isArchive) {
   const value = rec.data[field.key];
+  if (isArchive) {
+    return `<td>${renderStaticCell(field, value)}</td>`;
+  }
   if (field.type === "checkbox") {
     const checked = value === true || value === "true";
     if (field.auto) return `<td>${checked ? "✅" : ""}</td>`;
@@ -514,11 +524,26 @@ function buildFilterRow(f, i) {
   valueInput.value = f.value || "";
   valueInput.placeholder = "值";
 
+  const quickToday = document.createElement("button");
+  quickToday.type = "button";
+  quickToday.className = "btn btn-sm";
+  quickToday.textContent = "今天";
+  quickToday.onclick = () => { valueInput.value = "今天"; };
+
+  const quickYesterday = document.createElement("button");
+  quickYesterday.type = "button";
+  quickYesterday.className = "btn btn-sm";
+  quickYesterday.textContent = "昨天";
+  quickYesterday.onclick = () => { valueInput.value = "昨天"; };
+
   function refreshOps() {
     const type = schema.fields.find((fl) => fl.key === fieldSelect.value)?.type || "text";
     const ops = TYPE_OPS[type] || ["eq"];
     opSelect.innerHTML = ops.map((o) => `<option value="${o}">${OP_LABELS[o]}</option>`).join("");
     if (f.op) opSelect.value = f.op;
+    const showQuickDate = type === "date";
+    quickToday.style.display = showQuickDate ? "" : "none";
+    quickYesterday.style.display = showQuickDate ? "" : "none";
   }
   fieldSelect.onchange = refreshOps;
   refreshOps();
@@ -527,7 +552,7 @@ function buildFilterRow(f, i) {
   del.href = "#"; del.textContent = "✕"; del.className = "row-del";
   del.onclick = (e) => { e.preventDefault(); CURRENT_FILTERS.splice(i, 1); renderFilterRows(); };
 
-  row.append(fieldSelect, opSelect, valueInput, del);
+  row.append(fieldSelect, opSelect, valueInput, quickToday, quickYesterday, del);
   row.dataset.index = i;
   fieldSelect.dataset.role = "field"; opSelect.dataset.role = "op"; valueInput.dataset.role = "value";
   return row;

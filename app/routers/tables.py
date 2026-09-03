@@ -1,5 +1,6 @@
 import copy
 import datetime
+import logging
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -9,8 +10,10 @@ from pydantic import BaseModel
 from ..database import get_db
 from ..models import Record, SavedView, User
 from ..security import get_current_user
-from ..schemas_config import TABLE_SCHEMAS, get_schema, field_map
+from ..schemas_config import TABLE_SCHEMAS, get_schema, field_map, ARCHIVE_TABLE_KEYS
 from .. import automation
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/tables", tags=["tables"])
 
@@ -30,6 +33,27 @@ def _check_config_access(table_key: str, user: User):
         raise HTTPException(403, "只有管理员可以访问配置表")
 
 
+def _check_archive_writable(table_key: str):
+    """历史归档表只读，不允许新增/编辑/删除，只能查询和建视图。"""
+    if table_key in ARCHIVE_TABLE_KEYS:
+        raise HTTPException(403, "历史归档表是只读的，不支持新增/编辑/删除")
+
+
+def _safe_automation(db: Session, label: str, fn):
+    """
+    统一的自动化规则安全执行入口：任何自动化逻辑（联动生成任务、同步字段、归档等）
+    出错时，只记录日志并回滚这一步自己产生的改动，绝不影响调用方已经保存成功的数据、
+    也绝不让整个 HTTP 请求跟着失败。
+    出问题时看 `docker compose logs -f web`，会看到 "[automation]" 开头的报错堆栈。
+    """
+    try:
+        return fn()
+    except Exception:
+        logger.exception("[automation] %s 执行失败，已跳过，不影响本次保存", label)
+        db.rollback()
+        return None
+
+
 def _data_expr(field_key: str, field_type: str):
     """把 Record.data[field_key] 转成合适的 SQL 表达式，用于筛选/排序。"""
     text_expr = Record.data[field_key].astext
@@ -40,13 +64,25 @@ def _data_expr(field_key: str, field_type: str):
     return text_expr
 
 
+def _resolve_filter_value(field_type: str, value):
+    """支持筛选值填“今天”“昨天”（用于每日完成情况这类会随日期变化的视图），
+    保存下来的视图第二天打开还是对的，不会固定成某个写死的日期。"""
+    if field_type == "date" and isinstance(value, str):
+        if value in ("今天", "今日", "__TODAY__"):
+            return datetime.date.today().isoformat()
+        if value in ("昨天", "昨日", "__YESTERDAY__"):
+            return (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    return value
+
+
 def _apply_filters(query, table_key: str, filters: list):
     fmap = field_map(table_key)
     for f in filters or []:
-        key, op, value = f.get("field"), f.get("op"), f.get("value")
+        key, op, raw_value = f.get("field"), f.get("op"), f.get("value")
         field = fmap.get(key)
         if not field:
             continue
+        value = _resolve_filter_value(field["type"], raw_value)
         expr = _data_expr(key, field["type"])
         if op == "eq":
             query = query.filter(expr == value)
@@ -102,30 +138,35 @@ def list_schemas(db: Session = Depends(get_db), user: User = Depends(get_current
     schemas = copy.deepcopy(TABLE_SCHEMAS)
     active_usernames = None  # 懒加载，只有真的用到才查一次
     # 动态选项：比如 SKU 商品类目 跟 品类负责人配置表 保持同步；负责人字段跟用户管理名单保持同步
+    # 这里任何一个字段的动态选项解析出错，都只跳过那一个字段（保留写死的兜底选项），
+    # 不能让一条脏配置数据搞得整个系统连页面骨架都加载不出来。
     for table in schemas.values():
         for field in table["fields"]:
             src = field.get("dynamic_options")
             if not src:
                 continue
-            if src.get("source") == "users":
-                if active_usernames is None:
-                    active_usernames = [
-                        u.display_name for u in
-                        db.query(User).filter(User.is_active == True).order_by(User.id.asc()).all()  # noqa: E712
-                    ]
-                if active_usernames:
-                    field["options"] = active_usernames
-                continue
-            values = []
-            seen = set()
-            for r in db.query(Record).filter(Record.table_key == src["table"]).order_by(Record.id.asc()).all():
-                for fk in src["fields"]:
-                    v = (r.data or {}).get(fk)
-                    if v and v not in seen:
-                        seen.add(v)
-                        values.append(v)
-            if values:
-                field["options"] = values
+            try:
+                if src.get("source") == "users":
+                    if active_usernames is None:
+                        active_usernames = [
+                            u.display_name for u in
+                            db.query(User).filter(User.is_active == True).order_by(User.id.asc()).all()  # noqa: E712
+                        ]
+                    if active_usernames:
+                        field["options"] = active_usernames
+                    continue
+                values = []
+                seen = set()
+                for r in db.query(Record).filter(Record.table_key == src["table"]).order_by(Record.id.asc()).all():
+                    for fk in src["fields"]:
+                        v = (r.data or {}).get(fk)
+                        if v and v not in seen:
+                            seen.add(v)
+                            values.append(v)
+                if values:
+                    field["options"] = values
+            except Exception:
+                logger.exception("解析字段 %s 的动态选项失败，使用写死的兜底选项", field.get("key"))
     # 配置表只对管理员可见（连表结构定义都不返回给普通成员，前端自然不会显示对应菜单）
     if user.role != "admin":
         schemas = {k: v for k, v in schemas.items() if v.get("group") != "config"}
@@ -142,10 +183,17 @@ def query_records(table_key: str, payload: QueryIn, db: Session = Depends(get_db
                    user: User = Depends(get_current_user)):
     _require_table(table_key)
     _check_config_access(table_key, user)
-    query = db.query(Record).filter(Record.table_key == table_key)
-    query = _apply_filters(query, table_key, payload.filters)
-    query = _apply_sorts(query, table_key, payload.sorts)
-    records = query.all()
+    try:
+        query = db.query(Record).filter(Record.table_key == table_key)
+        query = _apply_filters(query, table_key, payload.filters)
+        query = _apply_sorts(query, table_key, payload.sorts)
+        records = query.all()
+    except Exception:
+        # 筛选/排序条件跟脏数据撞在一起可能导致类型转换报错，这里保底：
+        # 让用户至少还能看到这张表的数据（不排序不筛选），不至于连表都打不开。
+        logger.exception("查询 %s 时筛选/排序失败，已回退为不筛选不排序的默认列表", table_key)
+        db.rollback()
+        records = db.query(Record).filter(Record.table_key == table_key).order_by(Record.id.asc()).all()
     return [_serialize(r) for r in records]
 
 
@@ -158,6 +206,7 @@ def create_record(table_key: str, payload: RecordIn, db: Session = Depends(get_d
                    user: User = Depends(get_current_user)):
     schema = _require_table(table_key)
     _check_config_access(table_key, user)
+    _check_archive_writable(table_key)
     fmap = field_map(table_key)
     clean_data = {}
     for key, field in fmap.items():
@@ -171,30 +220,41 @@ def create_record(table_key: str, payload: RecordIn, db: Session = Depends(get_d
         if field["type"] == "user" and field.get("auto"):
             clean_data[field["key"]] = user.display_name
 
-    # 二期自动化：SKU 编号自动生成 gzs-yymmdd-00001
+    # 二期自动化：SKU 编号自动生成 gzs-yymmdd-00001（失败则退化成时间戳编号，保证仍能建SKU）
     if table_key == "sku":
-        clean_data["sku_code"] = automation.generate_sku_code(db)
+        clean_data["sku_code"] = (
+            _safe_automation(db, "generate_sku_code", lambda: automation.generate_sku_code(db))
+            or f"gzs-{datetime.datetime.utcnow().strftime('%y%m%d%H%M%S')}"
+        )
 
     # 二期自动化：新建任务时按配置表自动分配负责人，覆盖表单里可能带的值
     if table_key in ("ai_creative", "set_task"):
-        assigned = automation.assign_maker_for_create(db, table_key)
+        assigned = _safe_automation(
+            db, "assign_maker_for_create", lambda: automation.assign_maker_for_create(db, table_key)
+        )
         if assigned:
             clean_data["maker"] = assigned
     elif table_key == "pending_listing":
-        assigned = automation.assign_shop_owner_for_create(db, clean_data.get("related_sku"))
+        assigned = _safe_automation(
+            db, "assign_shop_owner_for_create",
+            lambda: automation.assign_shop_owner_for_create(db, clean_data.get("related_sku")),
+        )
         if assigned:
             clean_data["shop_owner"] = assigned
 
+    # 主记录先独立提交：不管后面的自动化联动是否出问题，这条记录本身一定能保存成功
     record = Record(table_key=table_key, data=clean_data, creator_id=user.id)
     db.add(record)
-    db.flush()
-
-    # 二期自动化：SKU 创建后自动生成 AI 主图二创任务
-    if table_key == "sku":
-        automation.on_sku_created(db, record, user.id)
-
     db.commit()
     db.refresh(record)
+
+    # 二期自动化：SKU 创建后自动生成 AI 主图二创任务（单独一个事务，出错不影响上面已保存的SKU）
+    if table_key == "sku":
+        _safe_automation(db, "on_sku_created", lambda: (
+            automation.on_sku_created(db, record, user.id), db.commit()
+        ))
+        db.refresh(record)
+
     return _serialize(record)
 
 
@@ -203,6 +263,7 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
                    user: User = Depends(get_current_user)):
     _require_table(table_key)
     _check_config_access(table_key, user)
+    _check_archive_writable(table_key)
     record = db.query(Record).filter(Record.id == record_id, Record.table_key == table_key).first()
     if not record:
         raise HTTPException(404, "记录不存在")
@@ -215,17 +276,33 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
             new_data[key] = value
     record.data = new_data
 
-    # 二期自动化：状态变化时同步 SKU 开发阶段 / 自动生成下游任务
-    if table_key == "ai_creative":
-        automation.on_ai_creative_saved(db, record, previous_data.get("status"), user.id)
-    elif table_key == "set_task":
-        automation.on_set_task_saved(db, record, previous_data.get("status"), user.id)
-    elif table_key == "pending_listing":
-        automation.on_pending_listing_saved(db, record, previous_data.get("is_listed"))
-    elif table_key == "sku" and new_data.get("priority") != previous_data.get("priority"):
-        automation.sync_priority_to_tasks(db, new_data.get("sku_code"), new_data.get("priority"))
-
+    # 主字段修改先独立提交：这一步成功了，用户点保存这个动作就不会失败，
+    # 不管下面的联动自动化是否出问题
     db.commit()
+    db.refresh(record)
+
+    # 二期自动化：状态变化时同步 SKU 开发阶段 / 自动生成下游任务（各自独立事务，互不影响）
+    if table_key == "ai_creative":
+        _safe_automation(db, "on_ai_creative_saved", lambda: (
+            automation.on_ai_creative_saved(db, record, previous_data.get("status"), user.id), db.commit()
+        ))
+    elif table_key == "set_task":
+        _safe_automation(db, "on_set_task_saved", lambda: (
+            automation.on_set_task_saved(db, record, previous_data.get("status"), user.id), db.commit()
+        ))
+    elif table_key == "pending_listing":
+        _safe_automation(db, "on_pending_listing_saved", lambda: (
+            automation.on_pending_listing_saved(db, record, previous_data.get("is_listed")), db.commit()
+        ))
+        if new_data.get("is_listed") in (True, "true"):
+            _safe_automation(db, "run_archive_if_needed", lambda: (
+                automation.run_archive_if_needed(db), db.commit()
+            ))
+    elif table_key == "sku" and new_data.get("priority") != previous_data.get("priority"):
+        _safe_automation(db, "sync_priority_to_tasks", lambda: (
+            automation.sync_priority_to_tasks(db, new_data.get("sku_code"), new_data.get("priority")), db.commit()
+        ))
+
     db.refresh(record)
     return _serialize(record)
 
@@ -235,6 +312,7 @@ def delete_record(table_key: str, record_id: int, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
     _require_table(table_key)
     _check_config_access(table_key, user)
+    _check_archive_writable(table_key)
     record = db.query(Record).filter(Record.id == record_id, Record.table_key == table_key).first()
     if not record:
         raise HTTPException(404, "记录不存在")

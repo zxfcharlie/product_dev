@@ -11,16 +11,24 @@
 4. 上架任务「是否已上架」变化 -> 实时同步 SKU.开发阶段（已上架 / 待上架）。
 5. SKU「优先级」变化 -> 实时同步到它关联的 AI主图任务 / 套图任务 的「优先级」字段；
    自动创建 AI主图任务 / 套图任务 时也会带上 SKU 当前的优先级。
+6. 已上架 SKU 达到 200 个时 -> 自动把最早上架的一批 SKU（及其关联的所有任务表记录）
+   归档到历史表，只在工作表里保留最近一批。
 
 设计上所有自动创建的任务的 “制作人/店铺负责人” 字段都由这里的轮询逻辑决定，
 用户手动新建业务表记录时也会经过这里分配（对应需求里“任务创建的时候默认按顺序分配”）。
+
+这个文件里的函数都是被 routers/tables.py 用 `_safe_automation` 包了一层再调用的：
+任何一步自动化失败，只会被记日志、回滚自己产生的改动，不会导致调用方那次保存请求失败。
 """
 import datetime
+import logging
 import re
 from typing import Optional
 from sqlalchemy.orm import Session
 
 from .models import Record
+
+logger = logging.getLogger(__name__)
 
 TASK_TYPE_LABELS = {
     "ai_creative": "AI主图任务",
@@ -267,3 +275,64 @@ def on_pending_listing_saved(db: Session, record: Record, previous_is_listed) ->
         sync_sku_dev_stage(db, sku_code, "已上架")
     else:
         sync_sku_dev_stage(db, sku_code, "待上架")
+
+
+# ---------------- 三期：历史归档 ----------------
+
+_ARCHIVE_MAP = {
+    "sku": "archive_sku",
+    "ai_creative": "archive_ai_creative",
+    "set_task": "archive_set_task",
+    "pending_listing": "archive_pending_listing",
+}
+
+
+def _archive_one(record: Record, dst_key: str, archived_at: str) -> None:
+    data = dict(record.data or {})
+    data["archived_at"] = archived_at
+    record.table_key = dst_key
+    record.data = data
+
+
+def run_archive_if_needed(db: Session, threshold: int = 200, keep_recent: int = 100) -> int:
+    """
+    已上架 SKU 数量达到 threshold 时，把最早上架的一批 SKU（连同它们在各任务表里的
+    所有相关记录）搬去历史归档表，只在工作表里保留最近 keep_recent 个，减少活跃表的查询压力。
+    返回本次归档的 SKU 数量。任何一个 SKU 归档失败都不影响其它 SKU 继续归档。
+    """
+    pending_records = _all_records(db, "pending_listing")
+    listed = [r for r in pending_records if (r.data or {}).get("is_listed") in (True, "true")]
+    if len(listed) < threshold:
+        return 0
+
+    def sort_key(r):
+        d = r.data or {}
+        return d.get("finished_at") or d.get("created_at") or ""
+
+    listed.sort(key=sort_key)
+    to_archive_count = len(listed) - keep_recent
+    if to_archive_count <= 0:
+        return 0
+
+    archived_at = datetime.date.today().isoformat()
+    archived_count = 0
+    for pending_rec in listed[:to_archive_count]:
+        sku_code = (pending_rec.data or {}).get("related_sku")
+        if not sku_code:
+            continue
+        try:
+            with db.begin_nested():  # SAVEPOINT：这个SKU出错只回滚它自己，不影响同一批里已经归档成功的其它SKU
+                sku_rec = find_sku_by_code(db, sku_code)
+                if sku_rec:
+                    _archive_one(sku_rec, _ARCHIVE_MAP["sku"], archived_at)
+                    db.add(sku_rec)
+                for src_key in ("ai_creative", "set_task", "pending_listing"):
+                    for r in _all_records(db, src_key):
+                        if (r.data or {}).get("related_sku") == sku_code:
+                            _archive_one(r, _ARCHIVE_MAP[src_key], archived_at)
+                            db.add(r)
+            archived_count += 1
+        except Exception:
+            logger.exception("[archive] SKU %s 归档失败，已跳过，继续归档同一批里的其它SKU", sku_code)
+            continue
+    return archived_count

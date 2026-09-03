@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from ..database import get_db
 from ..models import User
 from ..security import require_admin
+from .. import automation
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -55,3 +56,15 @@ def delete_user(user_id: int, db: Session = Depends(get_db), admin: User = Depen
     db.delete(u)
     db.commit()
     return {"ok": True}
+
+
+@router.post("/run-archive")
+def run_archive_now(force: bool = False, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    """
+    手动触发一次归档检查。force=False（默认）只有已上架SKU达到200个才会真的归档；
+    force=True 忽略这个门槛，只要有已上架SKU超过保留数量(100)就归档，方便测试/立即清理。
+    """
+    threshold = 0 if force else 200
+    count = automation.run_archive_if_needed(db, threshold=threshold, keep_recent=100)
+    db.commit()
+    return {"archived_skus": count}
