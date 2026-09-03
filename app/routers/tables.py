@@ -100,11 +100,21 @@ def _serialize(record: Record):
 @router.get("/schemas")
 def list_schemas(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     schemas = copy.deepcopy(TABLE_SCHEMAS)
-    # 动态选项：比如 SKU 商品类目 跟 品类负责人配置表 保持同步
+    active_usernames = None  # 懒加载，只有真的用到才查一次
+    # 动态选项：比如 SKU 商品类目 跟 品类负责人配置表 保持同步；负责人字段跟用户管理名单保持同步
     for table in schemas.values():
         for field in table["fields"]:
             src = field.get("dynamic_options")
             if not src:
+                continue
+            if src.get("source") == "users":
+                if active_usernames is None:
+                    active_usernames = [
+                        u.display_name for u in
+                        db.query(User).filter(User.is_active == True).order_by(User.id.asc()).all()  # noqa: E712
+                    ]
+                if active_usernames:
+                    field["options"] = active_usernames
                 continue
             values = []
             seen = set()
@@ -212,6 +222,8 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
         automation.on_set_task_saved(db, record, previous_data.get("status"), user.id)
     elif table_key == "pending_listing":
         automation.on_pending_listing_saved(db, record, previous_data.get("is_listed"))
+    elif table_key == "sku" and new_data.get("priority") != previous_data.get("priority"):
+        automation.sync_priority_to_tasks(db, new_data.get("sku_code"), new_data.get("priority"))
 
     db.commit()
     db.refresh(record)

@@ -16,7 +16,9 @@
 # 字段控制标记：
 #   auto            完全由系统生成，编辑/新建表单里都不出现（如创建时间、创建人、SKU编号、SKU开发阶段）
 #   auto_on_create  新建时不出现（由自动化规则填入），但可以在表格里点击单元格手动改（如制作人/店铺负责人）
-#   dynamic_options 该字段的可选项不是写死的，而是实时从某张配置表读取（如 SKU 商品类目 同步自 品类负责人配置表）
+#   dynamic_options 该字段的可选项不是写死的，而是实时读取——
+#                     {"table": X, "fields": [...]} 从某张配置表读取（如 SKU 商品类目 同步自 品类负责人配置表）
+#                     {"source": "users"} 从用户管理的账号名单读取（如 负责人 相关字段）
 #
 # group：业务表(business) 会在左侧菜单单独分组显示；配置表(config) 是二期新增的自动化规则数据源。
 
@@ -38,7 +40,7 @@ TABLE_SCHEMAS = {
              "options": ["SKU创建", "AI主图制作中", "套图制作中", "待上架", "已上架"]},
             {"key": "est_sales", "label": "eranks预估销量", "type": "number"},
             {"key": "listing_time", "label": "listing时间", "type": "text"},
-            {"key": "market_heat", "label": "市场热度", "type": "rating"},
+            {"key": "priority", "label": "优先级", "type": "rating"},
             {"key": "created_at", "label": "创建时间", "type": "date", "auto": True},
             {"key": "creator", "label": "创建人", "type": "user", "auto": True},
         ],
@@ -101,7 +103,8 @@ TABLE_SCHEMAS = {
         "fields": [
             {"key": "task_type", "label": "任务类型", "type": "select",
              "options": TASK_TYPE_OPTIONS, "required": True},
-            {"key": "assignees", "label": "负责人（按顺序，英文逗号分隔）", "type": "text"},
+            {"key": "assignees", "label": "负责人（从用户管理名单选，多选，按下方选项顺序轮流分配）",
+             "type": "multiselect", "dynamic_options": {"source": "users"}},
             {"key": "next_assign_index", "label": "下一个轮到第几位（从0开始，系统自动更新）", "type": "number"},
         ],
     },
@@ -122,7 +125,8 @@ TABLE_SCHEMAS = {
         "fields": [
             {"key": "level1_category", "label": "一级类目", "type": "text", "required": True},
             {"key": "level2_category", "label": "二级类目", "type": "text"},
-            {"key": "responsible_person", "label": "负责人", "type": "text"},
+            {"key": "responsible_person", "label": "负责人", "type": "select",
+             "dynamic_options": {"source": "users"}},
         ],
     },
 }

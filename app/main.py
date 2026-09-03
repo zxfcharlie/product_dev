@@ -9,6 +9,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy import text
 
 from .database import Base, engine, get_db
+from .models import Record
 from .routers import auth as auth_router
 from .routers import tables as tables_router
 from .routers import admin as admin_router
@@ -24,6 +25,7 @@ def _init_db_with_retry(max_attempts=10, delay_seconds=2):
         try:
             Base.metadata.create_all(bind=engine)
             _run_lightweight_migrations()
+            _migrate_market_heat_to_priority()
             return
         except OperationalError:
             if attempt == max_attempts:
@@ -38,6 +40,26 @@ def _run_lightweight_migrations():
     """
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS note TEXT"))
+
+
+def _migrate_market_heat_to_priority():
+    """SKU 的“市场热度”字段改名叫“优先级”，key 也从 market_heat 换成 priority，
+    这里把老数据里已经存在的 market_heat 值原样搬到 priority，不丢数据。"""
+    session = Session(bind=engine)
+    try:
+        records = session.query(Record).filter(Record.table_key == "sku").all()
+        changed = False
+        for r in records:
+            d = r.data or {}
+            if "market_heat" in d and "priority" not in d:
+                new_d = dict(d)
+                new_d["priority"] = new_d.pop("market_heat")
+                r.data = new_d
+                changed = True
+        if changed:
+            session.commit()
+    finally:
+        session.close()
 
 
 _init_db_with_retry()

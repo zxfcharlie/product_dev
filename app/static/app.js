@@ -156,7 +156,8 @@ function renderViewTabs() {
   VIEWS.forEach((v) => {
     const tab = document.createElement("div");
     tab.className = "view-tab" + (ACTIVE_VIEW_ID === v.id ? " active" : "");
-    tab.textContent = v.name;
+    tab.textContent = (v.is_shared ? "" : "🔒 ") + v.name;
+    tab.title = v.is_shared ? "团队共享视图" : "仅自己可见的私有视图";
     tab.onclick = () => switchView(v.id);
     tab.oncontextmenu = (e) => {
       e.preventDefault();
@@ -594,18 +595,22 @@ async function applyFilterModal() {
 }
 
 async function saveAsView() {
-  const name = prompt("视图名称：");
-  if (!name) return;
+  const nameInput = document.getElementById("view-name-input");
+  const shareCheckbox = document.getElementById("view-share-checkbox");
+  const name = nameInput.value.trim();
+  if (!name) { alert("请输入视图名称"); nameInput.focus(); return; }
   const { filters, sorts } = readFilterModalState();
   await api(`/api/tables/${CURRENT_TABLE}/views`, {
     method: "POST",
-    body: JSON.stringify({ name, filters, sorts, is_shared: true }),
+    body: JSON.stringify({ name, filters, sorts, is_shared: shareCheckbox.checked }),
   });
   CURRENT_FILTERS = filters;
   CURRENT_SORTS = sorts;
   await loadViews();
   const created = VIEWS.find((v) => v.name === name);
   ACTIVE_VIEW_ID = created ? created.id : null;
+  nameInput.value = "";
+  shareCheckbox.checked = true;
   renderViewTabs();
   closeModal("filter-modal");
   await loadRecords();

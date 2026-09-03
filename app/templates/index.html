@@ -55,6 +55,14 @@
     <hr>
     <div id="sort-rows"></div>
     <button class="btn btn-sm" onclick="addSortRow()">＋ 添加排序条件</button>
+    <hr>
+    <div class="form-row">
+      <label>保存为视图</label>
+      <input id="view-name-input" type="text" placeholder="视图名称，比如「我的待办」" />
+      <label class="checkbox-item" style="margin-top:8px;">
+        <input type="checkbox" id="view-share-checkbox" checked> 分享给所有人（不勾选则只有我自己能看到）
+      </label>
+    </div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal('filter-modal')">取消</button>
       <button class="btn" onclick="saveAsView()">保存为视图</button>

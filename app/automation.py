@@ -9,6 +9,8 @@
 3. 套图任务状态变化 -> 实时同步 SKU.开发阶段；变为「已完成」时自动生成上架任务
    （店铺负责人优先按 SKU 品类匹配 category_config，匹配不到则走任务负责人配置表轮询兜底）。
 4. 上架任务「是否已上架」变化 -> 实时同步 SKU.开发阶段（已上架 / 待上架）。
+5. SKU「优先级」变化 -> 实时同步到它关联的 AI主图任务 / 套图任务 的「优先级」字段；
+   自动创建 AI主图任务 / 套图任务 时也会带上 SKU 当前的优先级。
 
 设计上所有自动创建的任务的 “制作人/店铺负责人” 字段都由这里的轮询逻辑决定，
 用户手动新建业务表记录时也会经过这里分配（对应需求里“任务创建的时候默认按顺序分配”）。
@@ -88,8 +90,12 @@ def assign_round_robin(db: Session, task_type_key: str) -> Optional[str]:
 
     assignees = []
     for c in configs:
-        raw = (c.data or {}).get("assignees") or ""
-        assignees.extend([a.strip() for a in _SPLIT_RE.split(raw) if a.strip()])
+        raw = (c.data or {}).get("assignees")
+        if isinstance(raw, list):
+            names = [str(a).strip() for a in raw if str(a).strip()]
+        else:
+            names = [a.strip() for a in _SPLIT_RE.split(raw or "") if a.strip()]
+        assignees.extend(names)
     if not assignees:
         return None
 
@@ -146,6 +152,22 @@ def sync_sku_dev_stage(db: Session, sku_code: Optional[str], dev_stage: str) -> 
     db.add(sku_record)
 
 
+def sync_priority_to_tasks(db: Session, sku_code: Optional[str], priority) -> None:
+    """SKU 的“优先级”改变时，同步到它关联的 AI主图任务 / 套图任务 的“优先级”字段。"""
+    if not sku_code:
+        return
+    for table_key in ("ai_creative", "set_task"):
+        for r in _all_records(db, table_key):
+            if (r.data or {}).get("related_sku") != sku_code:
+                continue
+            d = dict(r.data or {})
+            if d.get("priority") == priority:
+                continue
+            d["priority"] = priority
+            r.data = d
+            db.add(r)
+
+
 def assign_maker_for_create(db: Session, table_key: str) -> Optional[str]:
     """新建 ai_creative / set_task 记录（无论手动还是自动）时，用来决定“制作人”字段。"""
     return assign_round_robin(db, table_key)
@@ -175,6 +197,7 @@ def on_sku_created(db: Session, sku_record: Record, creator_id: int) -> None:
         "maker": assign_maker_for_create(db, "ai_creative") or "",
         "competitor_link": data.get("competitor_link", ""),
         "design_highlight": data.get("design_highlight", ""),
+        "priority": data.get("priority", 0),
         "created_at": datetime.date.today().isoformat(),
     }
     _create_record(db, "ai_creative", ai_data, creator_id)
@@ -191,12 +214,14 @@ def on_ai_creative_saved(db: Session, record: Record, previous_status: Optional[
     elif status == "已完成":
         sync_sku_dev_stage(db, sku_code, "套图制作中")
         if not data.get("_spawned_set_task"):
+            sku_record = find_sku_by_code(db, sku_code)
             set_data = {
                 "task_code": generate_task_code(db, "set_task"),
                 "related_sku": sku_code,
                 "status": "待制作",
                 "maker": assign_maker_for_create(db, "set_task") or "",
                 "competitor_link": data.get("competitor_link", ""),
+                "priority": (sku_record.data or {}).get("priority", 0) if sku_record else data.get("priority", 0),
                 "created_at": datetime.date.today().isoformat(),
             }
             _create_record(db, "set_task", set_data, creator_id)
