@@ -121,24 +121,56 @@ def assign_round_robin(db: Session, task_type_key: str) -> Optional[str]:
     return chosen
 
 
-def resolve_shop_owner_by_category(db: Session, sku_categories) -> Optional[str]:
-    """按 SKU 品类去品类负责人配置表匹配负责人（一级或二级类目命中即可）。"""
-    if not sku_categories:
-        return None
-    if isinstance(sku_categories, str):
-        sku_categories = [sku_categories]
-    configs = _all_records(db, "category_config")
-    for cat in sku_categories:
-        cat = (cat or "").strip()
-        if not cat:
-            continue
-        for c in configs:
-            d = c.data or {}
-            if cat == (d.get("level1_category") or "").strip() or cat == (d.get("level2_category") or "").strip():
-                person = (d.get("responsible_person") or "").strip()
-                if person:
-                    return person
-    return None
+def _normalize_category_list(value) -> list:
+    if not value:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    return [str(c).strip() for c in value if c and str(c).strip()]
+
+
+def resolve_shop_for_category(db: Session, sku_categories):
+    """
+    按 SKU 品类找归属的店铺和负责人，返回 (店铺名, 负责人) 二元组，两者都可能是 None。
+
+    优先级：
+    1. 店铺配置表——按“所属品类”命中的店铺，负责人就是这个店铺的负责人（也带出店铺名）。
+    2. 品类负责人配置表——命中了但没配对应店铺时的兜底，只有负责人、没有店铺名。
+    3. 都没匹配到，交给调用方再走任务负责人配置表轮询兜底。
+    """
+    categories = _normalize_category_list(sku_categories)
+    if not categories:
+        return None, None
+
+    for shop in _all_records(db, "shop_config"):
+        d = shop.data or {}
+        shop_categories = _normalize_category_list(d.get("category"))
+        if any(c in shop_categories for c in categories):
+            shop_name = (d.get("shop_name") or "").strip() or None
+            owner = (d.get("responsible_person") or "").strip() or None
+            if shop_name or owner:
+                return shop_name, owner
+
+    for cfg in _all_records(db, "category_config"):
+        d = cfg.data or {}
+        level1 = (d.get("level1_category") or "").strip()
+        level2 = (d.get("level2_category") or "").strip()
+        if any(c == level1 or c == level2 for c in categories):
+            person = (d.get("responsible_person") or "").strip()
+            if person:
+                return None, person
+
+    return None, None
+
+
+def assign_shop_fields_for_create(db: Session, related_sku: Optional[str]) -> dict:
+    """新建上架任务时，决定“所属店铺”和“店铺负责人”两个字段。"""
+    sku_record = find_sku_by_code(db, related_sku)
+    sku_categories = (sku_record.data or {}).get("category") if sku_record else None
+    shop_name, owner = resolve_shop_for_category(db, sku_categories)
+    if not owner:
+        owner = assign_round_robin(db, "pending_listing")
+    return {"shop_name": shop_name or "", "shop_owner": owner or ""}
 
 
 def _create_record(db: Session, table_key: str, data: dict, creator_id: int) -> Record:
@@ -179,16 +211,6 @@ def sync_priority_to_tasks(db: Session, sku_code: Optional[str], priority) -> No
 def assign_maker_for_create(db: Session, table_key: str) -> Optional[str]:
     """新建 ai_creative / set_task 记录（无论手动还是自动）时，用来决定“制作人”字段。"""
     return assign_round_robin(db, table_key)
-
-
-def assign_shop_owner_for_create(db: Session, related_sku: Optional[str]) -> Optional[str]:
-    """新建 pending_listing 记录时，用来决定“店铺负责人”字段：先按品类匹配，匹配不到再轮询兜底。"""
-    sku_record = find_sku_by_code(db, related_sku)
-    sku_categories = (sku_record.data or {}).get("category") if sku_record else None
-    owner = resolve_shop_owner_by_category(db, sku_categories)
-    if owner:
-        return owner
-    return assign_round_robin(db, "pending_listing")
 
 
 def on_sku_created(db: Session, sku_record: Record, creator_id: int) -> None:
@@ -250,11 +272,13 @@ def on_set_task_saved(db: Session, record: Record, previous_status: Optional[str
     elif status == "已完成":
         sync_sku_dev_stage(db, sku_code, "待上架")
         if not data.get("_spawned_pending"):
+            shop_fields = assign_shop_fields_for_create(db, sku_code)
             pending_data = {
                 "task_code": generate_task_code(db, "pending_listing"),
                 "note": f"套图任务完成自动创建 - SKU: {sku_code}",
                 "is_listed": False,
-                "shop_owner": assign_shop_owner_for_create(db, sku_code) or "",
+                "shop_name": shop_fields["shop_name"],
+                "shop_owner": shop_fields["shop_owner"],
                 "related_sku": sku_code,
                 "created_at": datetime.date.today().isoformat(),
             }

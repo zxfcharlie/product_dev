@@ -91,6 +91,7 @@ TABLE_SCHEMAS = {
             {"key": "finished_at", "label": "完成时间", "type": "date"},
             {"key": "created_at", "label": "创建时间", "type": "date", "auto": True},
             {"key": "is_listed", "label": "是否已上架", "type": "checkbox"},
+            {"key": "shop_name", "label": "所属店铺", "type": "text", "auto_on_create": True},
             {"key": "shop_owner", "label": "店铺负责人", "type": "text", "auto_on_create": True},
             {"key": "related_sku", "label": "关联SKU", "type": "text"},
         ],
@@ -115,7 +116,10 @@ TABLE_SCHEMAS = {
         "fields": [
             {"key": "shop_name", "label": "店铺名", "type": "text", "required": True},
             {"key": "shop_note", "label": "店铺备注", "type": "long_text"},
-            {"key": "category", "label": "所属品类", "type": "text"},
+            {"key": "category", "label": "所属品类（跟品类负责人配置表联动）", "type": "multiselect",
+             "dynamic_options": {"table": "category_config", "fields": ["level1_category", "level2_category"]}},
+            {"key": "responsible_person", "label": "店铺负责人", "type": "select",
+             "dynamic_options": {"source": "users"}},
         ],
     },
     "category_config": {

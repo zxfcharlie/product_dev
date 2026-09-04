@@ -235,12 +235,15 @@ def create_record(table_key: str, payload: RecordIn, db: Session = Depends(get_d
         if assigned:
             clean_data["maker"] = assigned
     elif table_key == "pending_listing":
-        assigned = _safe_automation(
-            db, "assign_shop_owner_for_create",
-            lambda: automation.assign_shop_owner_for_create(db, clean_data.get("related_sku")),
+        shop_fields = _safe_automation(
+            db, "assign_shop_fields_for_create",
+            lambda: automation.assign_shop_fields_for_create(db, clean_data.get("related_sku")),
         )
-        if assigned:
-            clean_data["shop_owner"] = assigned
+        if shop_fields:
+            if shop_fields.get("shop_name"):
+                clean_data["shop_name"] = shop_fields["shop_name"]
+            if shop_fields.get("shop_owner"):
+                clean_data["shop_owner"] = shop_fields["shop_owner"]
 
     # 主记录先独立提交：不管后面的自动化联动是否出问题，这条记录本身一定能保存成功
     record = Record(table_key=table_key, data=clean_data, creator_id=user.id)
