@@ -280,10 +280,23 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
             new_data[key] = value
     record.data = new_data
 
+    # 诊断日志：把这次请求“收到的值”和“准备存的值”都打出来，方便定位
+    # “界面显示保存了又弹回去”这类问题——如果日志里这两行的值本身就不对，
+    # 说明是前端发的数据有问题；如果这两行是对的，后面又变了，说明是自动化环节改回去的。
+    logger.info(
+        "[update_record] table=%s id=%s 收到的字段=%s | status: %s -> %s",
+        table_key, record_id, dict(payload.data),
+        previous_data.get("status"), new_data.get("status"),
+    )
+
     # 主字段修改先独立提交：这一步成功了，用户点保存这个动作就不会失败，
     # 不管下面的联动自动化是否出问题
     db.commit()
     db.refresh(record)
+    logger.info(
+        "[update_record] table=%s id=%s 主字段提交后数据库里的status=%s",
+        table_key, record_id, (record.data or {}).get("status"),
+    )
 
     # 三期自动化：状态变化时同步 SKU 开发阶段 / 记录完成时间 / 自动生成下游任务
     # 拆成多个独立的自动化步骤，各自单独提交——就算“生成下游任务”这步出问题，
@@ -293,6 +306,10 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
             automation.on_ai_creative_saved(db, record, previous_data.get("status"), user.id), db.commit()
         ))
         db.refresh(record)
+        logger.info(
+            "[update_record] table=%s id=%s on_ai_creative_saved后status=%s",
+            table_key, record_id, (record.data or {}).get("status"),
+        )
         _safe_automation(db, "spawn_set_task_if_needed", lambda: (
             automation.spawn_set_task_if_needed(db, record, user.id), db.commit()
         ))
@@ -301,6 +318,10 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
             automation.on_set_task_saved(db, record, previous_data.get("status"), user.id), db.commit()
         ))
         db.refresh(record)
+        logger.info(
+            "[update_record] table=%s id=%s on_set_task_saved后status=%s",
+            table_key, record_id, (record.data or {}).get("status"),
+        )
         _safe_automation(db, "spawn_pending_listing_if_needed", lambda: (
             automation.spawn_pending_listing_if_needed(db, record, user.id), db.commit()
         ))
@@ -318,6 +339,10 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
         ))
 
     db.refresh(record)
+    logger.info(
+        "[update_record] table=%s id=%s 最终返回给前端的status=%s",
+        table_key, record_id, (record.data or {}).get("status"),
+    )
     return _serialize(record)
 
 

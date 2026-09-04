@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>Etsy 运营任务管理系统</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v={{ app_version }}">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 </head>
 <body>
@@ -72,6 +72,6 @@
 </div>
 
 <script>window.CURRENT_USER = {{ user_json | safe }};</script>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v={{ app_version }}"></script>
 </body>
 </html>

@@ -17,7 +17,20 @@ from .routers import admin as admin_router
 from .routers import dashboard as dashboard_router
 from .security import get_current_user_optional
 
+# 显式配置日志：不加这个，我们自己模块里 logger.info/logger.exception 打的东西
+# 很可能根本不会出现在 `docker compose logs` 里（uvicorn 默认只配置了它自己的几个
+# logger，不会自动帮我们的业务代码开日志输出）。force=True 保证即使 uvicorn
+# 已经动过日志配置，这里也能生效。
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    force=True,
+)
 logger = logging.getLogger(__name__)
+
+# 静态资源加个版本号：每次容器重启（也就是每次部署）这个值都会变，
+# 浏览器就不会因为缓存住旧的 app.js/style.css 而看起来"更新了但界面行为没变"。
+APP_VERSION = str(int(time.time()))
 
 app = FastAPI(title="Etsy 运营任务管理系统")
 
@@ -118,12 +131,12 @@ app.include_router(dashboard_router.router)
 
 @app.get("/login")
 def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
+    return templates.TemplateResponse("login.html", {"request": request, "app_version": APP_VERSION})
 
 
 @app.get("/register")
 def register_page(request: Request):
-    return templates.TemplateResponse("register.html", {"request": request})
+    return templates.TemplateResponse("register.html", {"request": request, "app_version": APP_VERSION})
 
 
 @app.get("/")
@@ -135,7 +148,7 @@ def index(request: Request, db: Session = Depends(get_db)):
         "id": user.id, "display_name": user.display_name, "role": user.role,
     })
     return templates.TemplateResponse(
-        "index.html", {"request": request, "user": user, "user_json": user_json}
+        "index.html", {"request": request, "user": user, "user_json": user_json, "app_version": APP_VERSION}
     )
 
 
