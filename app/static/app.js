@@ -377,8 +377,17 @@ async function activateCell(recordId, fieldKey, tdEl) {
 }
 
 async function finishCellEdit(recordId, fieldKey, tdEl, newValue) {
-  tdEl.classList.remove("editing");
-  await saveCellValue(recordId, fieldKey, newValue);
+  // 关键修复：这里不能提前摘掉“正在编辑”标记。之前的问题就是这里过早摘掉了标记——
+  // 保存请求（PUT + 查询）还在网络上跑的这一两秒里，如果用户又点了一下同一个格子，
+  // 会用还没刷新的旧数据弹出第二个“幽灵”编辑框，等第一次保存完成、表格重新渲染时，
+  // 这个幽灵框被移除会触发它自己的失焦保存，把旧值又存回去——这正是"回弹"的真正原因。
+  // 保存成功后 loadRecords() 会重新渲染整张表，这个 tdEl 节点连同标记会被整体替换掉，
+  // 不需要手动摘除；只有保存失败时才需要手动摘掉，否则这个格子会永久卡死点不动。
+  try {
+    await saveCellValue(recordId, fieldKey, newValue);
+  } catch (e) {
+    tdEl.classList.remove("editing");
+  }
 }
 
 async function saveCellValue(recordId, fieldKey, value) {
