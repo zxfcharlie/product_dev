@@ -300,15 +300,25 @@ async function activateCell(recordId, fieldKey, tdEl) {
   const field = schema.fields.find((f) => f.key === fieldKey);
   if (!field || field.auto) return;
 
+  // 关键：必须在任何 await 之前就标记“正在编辑”，否则用户连续点击/双击同一个格子时，
+  // 会在 refreshSchemas() 这个异步等待期间并发触发第二次编辑会话，产生两个互相不知道
+  // 对方存在的 <select>——用户实际操作的那个正确保存了，另一个没人碰过的“幽灵”下拉框
+  // 之后自己失焦，会把它自己那份没被改过的旧值又保存一次，把刚保存对的值覆盖回去。
+  tdEl.classList.add("editing");
+
   // select / multiselect 的可选项可能来自配置表，进编辑前刷新一次，保证选项是最新的
   if (field.type === "select" || field.type === "multiselect") {
-    await refreshSchemas();
+    try {
+      await refreshSchemas();
+    } catch (e) {
+      // 刷新选项失败也不阻塞这次编辑，用现有的 SCHEMAS 兜底
+    }
   }
-  const freshField = SCHEMAS[CURRENT_TABLE].fields.find((f) => f.key === fieldKey);
+  const freshField = SCHEMAS[CURRENT_TABLE].fields.find((f) => f.key === fieldKey) || field;
   const rec = RECORDS.find((r) => r.id === recordId);
+  if (!rec) { tdEl.classList.remove("editing"); return; }
   const value = rec.data[fieldKey];
 
-  tdEl.classList.add("editing");
   tdEl.innerHTML = "";
   let input;
 
