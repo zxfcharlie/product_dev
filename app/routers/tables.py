@@ -273,6 +273,14 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
     if not record:
         raise HTTPException(404, "记录不存在")
 
+    # 诊断日志：不管乐观锁检测有没有触发，都先把两边的版本值打出来，
+    # 下次复现问题时能直接看出是“前端根本没带这个值”还是“带了但没识别出冲突”。
+    logger.info(
+        "[update_record] table=%s id=%s 乐观锁校验：客户端认为的版本=%r | 数据库当前版本=%r",
+        table_key, record_id, payload.expected_updated_at,
+        record.updated_at.isoformat() if record.updated_at else None,
+    )
+
     # 乐观锁冲突检测：如果客户端带了它以为的“最后修改时间”，且跟数据库里实际的对不上，
     # 说明这条记录在它看到的那份数据之后已经被别人（或它自己开的另一个标签页）改过了——
     # 直接拒绝这次保存并提示刷新，而不是悄悄用这份过时的数据覆盖掉最新的修改。
@@ -280,6 +288,7 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
     if payload.expected_updated_at:
         current_updated_at = record.updated_at.isoformat() if record.updated_at else None
         if current_updated_at and payload.expected_updated_at != current_updated_at:
+            logger.info("[update_record] table=%s id=%s 乐观锁冲突，拒绝本次保存", table_key, record_id)
             raise HTTPException(
                 409,
                 "这条记录已经被修改过了（可能是在另一个标签页/设备上），请刷新页面查看最新数据后再编辑",
