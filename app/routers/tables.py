@@ -285,14 +285,24 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
     db.commit()
     db.refresh(record)
 
-    # 二期自动化：状态变化时同步 SKU 开发阶段 / 自动生成下游任务（各自独立事务，互不影响）
+    # 三期自动化：状态变化时同步 SKU 开发阶段 / 记录完成时间 / 自动生成下游任务
+    # 拆成多个独立的自动化步骤，各自单独提交——就算“生成下游任务”这步出问题，
+    # 前面已经成功记录的“完成时间”“开发阶段同步”不会被连累撤销。
     if table_key == "ai_creative":
         _safe_automation(db, "on_ai_creative_saved", lambda: (
             automation.on_ai_creative_saved(db, record, previous_data.get("status"), user.id), db.commit()
         ))
+        db.refresh(record)
+        _safe_automation(db, "spawn_set_task_if_needed", lambda: (
+            automation.spawn_set_task_if_needed(db, record, user.id), db.commit()
+        ))
     elif table_key == "set_task":
         _safe_automation(db, "on_set_task_saved", lambda: (
             automation.on_set_task_saved(db, record, previous_data.get("status"), user.id), db.commit()
+        ))
+        db.refresh(record)
+        _safe_automation(db, "spawn_pending_listing_if_needed", lambda: (
+            automation.spawn_pending_listing_if_needed(db, record, user.id), db.commit()
         ))
     elif table_key == "pending_listing":
         _safe_automation(db, "on_pending_listing_saved", lambda: (

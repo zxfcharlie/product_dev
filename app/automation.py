@@ -253,6 +253,11 @@ def on_sku_created(db: Session, sku_record: Record, creator_id: int) -> None:
 
 
 def on_ai_creative_saved(db: Session, record: Record, previous_status: Optional[str], creator_id: int) -> None:
+    """
+    状态变化时先做“基本不会出错”的部分：同步 SKU 开发阶段、标记完成时间。
+    生成下游套图任务放在 spawn_set_task_if_needed 里单独一个自动化步骤——
+    就算生成下游任务那步出问题，这里已经记录的完成时间也不会被连累撤销。
+    """
     data = record.data or {}
     status = data.get("status")
     sku_code = data.get("related_sku")
@@ -260,28 +265,44 @@ def on_ai_creative_saved(db: Session, record: Record, previous_status: Optional[
         return
     if status in ("待制作", "制作中"):
         sync_sku_dev_stage(db, sku_code, "AI主图制作中")
-    elif status == "已完成":
-        sync_sku_dev_stage(db, sku_code, "套图制作中")
-        if not data.get("_spawned_set_task"):
-            sku_record = find_sku_by_code(db, sku_code)
-            sku_categories = (sku_record.data or {}).get("category") if sku_record else None
-            set_data = {
-                "task_code": generate_task_code(db, "set_task"),
-                "related_sku": sku_code,
-                "status": "待制作",
-                "maker": assign_round_robin(db, "set_task", sku_categories) or "",
-                "competitor_link": data.get("competitor_link", ""),
-                "priority": (sku_record.data or {}).get("priority", 0) if sku_record else data.get("priority", 0),
-                "created_at": datetime.date.today().isoformat(),
-            }
-            _create_record(db, "set_task", set_data, creator_id)
-            new_data = dict(data)
-            new_data["_spawned_set_task"] = True
-            record.data = new_data
-            db.add(record)
+        return
+    if status != "已完成":
+        return
+    sync_sku_dev_stage(db, sku_code, "套图制作中")
+    if not data.get("finished_at"):
+        new_data = dict(data)
+        new_data["finished_at"] = datetime.date.today().isoformat()
+        record.data = new_data
+        db.add(record)
+
+
+def spawn_set_task_if_needed(db: Session, record: Record, creator_id: int) -> None:
+    """AI主图任务已完成时自动生成套图任务（幂等：同一条任务只会触发一次）。"""
+    data = record.data or {}
+    if data.get("status") != "已完成" or data.get("_spawned_set_task"):
+        return
+    sku_code = data.get("related_sku")
+    sku_record = find_sku_by_code(db, sku_code)
+    sku_categories = (sku_record.data or {}).get("category") if sku_record else None
+    set_data = {
+        "task_code": generate_task_code(db, "set_task"),
+        "related_sku": sku_code,
+        "status": "待制作",
+        "maker": assign_round_robin(db, "set_task", sku_categories) or "",
+        "competitor_link": data.get("competitor_link", ""),
+        "priority": (sku_record.data or {}).get("priority", 0) if sku_record else data.get("priority", 0),
+        "created_at": datetime.date.today().isoformat(),
+    }
+    _create_record(db, "set_task", set_data, creator_id)
+    new_data = dict(data)
+    new_data["_spawned_set_task"] = True
+    record.data = new_data
+    db.add(record)
 
 
 def on_set_task_saved(db: Session, record: Record, previous_status: Optional[str], creator_id: int) -> None:
+    """同上：先只做同步开发阶段 + 记录完成时间，生成下游上架任务放到
+    spawn_pending_listing_if_needed 里单独处理。"""
     data = record.data or {}
     status = data.get("status")
     sku_code = data.get("related_sku")
@@ -289,24 +310,38 @@ def on_set_task_saved(db: Session, record: Record, previous_status: Optional[str
         return
     if status in ("待制作", "制作中"):
         sync_sku_dev_stage(db, sku_code, "套图制作中")
-    elif status == "已完成":
-        sync_sku_dev_stage(db, sku_code, "待上架")
-        if not data.get("_spawned_pending"):
-            shop_fields = assign_shop_fields_for_create(db, sku_code)
-            pending_data = {
-                "task_code": generate_task_code(db, "pending_listing"),
-                "note": f"套图任务完成自动创建 - SKU: {sku_code}",
-                "is_listed": False,
-                "shop_name": shop_fields["shop_name"],
-                "shop_owner": shop_fields["shop_owner"],
-                "related_sku": sku_code,
-                "created_at": datetime.date.today().isoformat(),
-            }
-            _create_record(db, "pending_listing", pending_data, creator_id)
-            new_data = dict(data)
-            new_data["_spawned_pending"] = True
-            record.data = new_data
-            db.add(record)
+        return
+    if status != "已完成":
+        return
+    sync_sku_dev_stage(db, sku_code, "待上架")
+    if not data.get("finished_at"):
+        new_data = dict(data)
+        new_data["finished_at"] = datetime.date.today().isoformat()
+        record.data = new_data
+        db.add(record)
+
+
+def spawn_pending_listing_if_needed(db: Session, record: Record, creator_id: int) -> None:
+    """套图任务已完成时自动生成上架任务（幂等：同一条任务只会触发一次）。"""
+    data = record.data or {}
+    if data.get("status") != "已完成" or data.get("_spawned_pending"):
+        return
+    sku_code = data.get("related_sku")
+    shop_fields = assign_shop_fields_for_create(db, sku_code)
+    pending_data = {
+        "task_code": generate_task_code(db, "pending_listing"),
+        "note": f"套图任务完成自动创建 - SKU: {sku_code}",
+        "is_listed": False,
+        "shop_name": shop_fields["shop_name"],
+        "shop_owner": shop_fields["shop_owner"],
+        "related_sku": sku_code,
+        "created_at": datetime.date.today().isoformat(),
+    }
+    _create_record(db, "pending_listing", pending_data, creator_id)
+    new_data = dict(data)
+    new_data["_spawned_pending"] = True
+    record.data = new_data
+    db.add(record)
 
 
 def on_pending_listing_saved(db: Session, record: Record, previous_is_listed) -> None:
@@ -317,6 +352,11 @@ def on_pending_listing_saved(db: Session, record: Record, previous_is_listed) ->
         return
     if is_listed in (True, "true"):
         sync_sku_dev_stage(db, sku_code, "已上架")
+        if not data.get("finished_at"):
+            new_data = dict(data)
+            new_data["finished_at"] = datetime.date.today().isoformat()
+            record.data = new_data
+            db.add(record)
     else:
         sync_sku_dev_stage(db, sku_code, "待上架")
 
