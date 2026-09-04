@@ -814,7 +814,7 @@ function renderDashboard(d) {
       ${leaderboardCard("上架任务 本月完成排行", d.leaderboards.pending_listing)}
     </div>
 
-    <div class="dash-chart-card dash-chart-solo"><h4>各店铺今日商品任务分布</h4><canvas id="chart-shop"></canvas></div>
+    <div class="dash-chart-card dash-chart-solo"><h4>今日商品任务品类分布（附对应店铺）</h4><canvas id="chart-shop"></canvas></div>
 
     <div class="dash-updated">最近更新：${new Date(d.generated_at + "Z").toLocaleString("zh-CN")}（每 30 秒自动刷新）</div>
   `;

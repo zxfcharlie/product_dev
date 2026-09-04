@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import Record, User
 from ..security import get_current_user
+from .. import automation
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -107,17 +108,43 @@ def _monthly_leaderboard(records, group_field: str, is_done) -> list:
     return [{"name": name, "count": count} for name, count in ranking]
 
 
-def _shop_distribution_today(records) -> dict:
-    """当日（按创建时间）各店铺的商品任务数量分布，用于饼图。"""
+def _category_distribution_today(db: Session, ai_records, set_records, pending_records) -> dict:
+    """
+    当日（按创建时间）AI主图/套图/上架 这三张任务表里，按 SKU 品类统计任务数量分布，
+    图例标签把品类对应的店铺名一起带出来（比如"数字产品（ShopA）"），方便一眼看出
+    今天这些任务分别属于哪个品类、又会流向哪个店铺。
+    一个 SKU 可能同时属于多个品类，这种情况下会计入它所属的每一个品类。
+    """
     today = _iso(0)
+    all_records = list(ai_records) + list(set_records) + list(pending_records)
     counts = defaultdict(int)
-    for r in records:
+    sku_cache = {}
+    for r in all_records:
         d = r.data or {}
         if d.get("created_at") != today:
             continue
-        name = (d.get("shop_name") or "").strip() or "未分配店铺"
-        counts[name] += 1
-    return dict(counts)
+        sku_code = d.get("related_sku")
+        if not sku_code:
+            continue
+        if sku_code not in sku_cache:
+            sku_cache[sku_code] = automation.find_sku_by_code(db, sku_code)
+        sku_record = sku_cache[sku_code]
+        if not sku_record:
+            continue
+        categories = (sku_record.data or {}).get("category")
+        if isinstance(categories, str):
+            categories = [categories]
+        for cat in (categories or []):
+            cat = (cat or "").strip()
+            if cat:
+                counts[cat] += 1
+
+    labeled = defaultdict(int)
+    for cat, count in counts.items():
+        shop_name, _owner = automation.resolve_shop_for_category(db, [cat])
+        label = f"{cat}（{shop_name}）" if shop_name else cat
+        labeled[label] += count
+    return dict(labeled)
 
 
 @router.get("/summary")
@@ -157,7 +184,7 @@ def dashboard_summary(db: Session = Depends(get_db), user: User = Depends(get_cu
         ),
     }
 
-    shop_distribution_today = _shop_distribution_today(pending_records)
+    shop_distribution_today = _category_distribution_today(db, ai_records, set_records, pending_records)
 
     return {
         "totals": totals,
