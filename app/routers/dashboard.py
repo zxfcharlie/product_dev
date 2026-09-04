@@ -85,6 +85,41 @@ def _pending_today_stats(records, today: str, yesterday: str):
     }
 
 
+def _month_prefix() -> str:
+    return datetime.date.today().strftime("%Y-%m")
+
+
+def _monthly_leaderboard(records, group_field: str, is_done) -> list:
+    """按“负责人”统计本月完成数量并按完成数从高到低排名。is_done 是判断一条记录
+    是否算“完成”的函数；只统计 finished_at 落在本月的记录。"""
+    month_prefix = _month_prefix()
+    counts = defaultdict(int)
+    for r in records:
+        d = r.data or {}
+        finished_at = d.get("finished_at") or ""
+        if not finished_at.startswith(month_prefix):
+            continue
+        if not is_done(d):
+            continue
+        name = (d.get(group_field) or "").strip() or "未分配"
+        counts[name] += 1
+    ranking = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"name": name, "count": count} for name, count in ranking]
+
+
+def _shop_distribution_today(records) -> dict:
+    """当日（按创建时间）各店铺的商品任务数量分布，用于饼图。"""
+    today = _iso(0)
+    counts = defaultdict(int)
+    for r in records:
+        d = r.data or {}
+        if d.get("created_at") != today:
+            continue
+        name = (d.get("shop_name") or "").strip() or "未分配店铺"
+        counts[name] += 1
+    return dict(counts)
+
+
 @router.get("/summary")
 def dashboard_summary(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     ai_records = _records(db, "ai_creative")
@@ -114,20 +149,22 @@ def dashboard_summary(db: Session = Depends(get_db), user: User = Depends(get_cu
         "pending_listing": _pending_today_stats(pending_records, today, yesterday),
     }
 
-    status_distribution = {
-        "ai_creative": {s: _status_count(ai_records, s) for s in STATUS_OPTIONS},
-        "set_task": {s: _status_count(set_records, s) for s in STATUS_OPTIONS},
-        "pending_listing": {
-            "已上架": listed_count,
-            "待上架": totals["pending_listing"]["total"] - listed_count,
-        },
+    leaderboards = {
+        "ai_creative": _monthly_leaderboard(ai_records, "maker", lambda d: d.get("status") == "已完成"),
+        "set_task": _monthly_leaderboard(set_records, "maker", lambda d: d.get("status") == "已完成"),
+        "pending_listing": _monthly_leaderboard(
+            pending_records, "shop_owner", lambda d: d.get("is_listed") in (True, "true")
+        ),
     }
+
+    shop_distribution_today = _shop_distribution_today(pending_records)
 
     return {
         "totals": totals,
         "by_maker": by_maker,
         "by_owner": by_owner,
         "today": today_block,
-        "status_distribution": status_distribution,
+        "leaderboards": leaderboards,
+        "shop_distribution_today": shop_distribution_today,
         "generated_at": datetime.datetime.utcnow().isoformat(),
     }

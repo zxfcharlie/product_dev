@@ -809,16 +809,29 @@ function renderDashboard(d) {
     </div>
 
     <div class="dash-row">
-      <div class="dash-chart-card"><h4>AI主图二创任务状态分布</h4><canvas id="chart-ai"></canvas></div>
-      <div class="dash-chart-card"><h4>套图任务状态分布</h4><canvas id="chart-set"></canvas></div>
-      <div class="dash-chart-card"><h4>待上架任务状态分布</h4><canvas id="chart-pending"></canvas></div>
+      ${leaderboardCard("AI主图任务 本月完成排行", d.leaderboards.ai_creative)}
+      ${leaderboardCard("套图任务 本月完成排行", d.leaderboards.set_task)}
+      ${leaderboardCard("上架任务 本月完成排行", d.leaderboards.pending_listing)}
     </div>
+
+    <div class="dash-chart-card dash-chart-solo"><h4>各店铺今日商品任务分布</h4><canvas id="chart-shop"></canvas></div>
 
     <div class="dash-updated">最近更新：${new Date(d.generated_at + "Z").toLocaleString("zh-CN")}（每 30 秒自动刷新）</div>
   `;
-  renderPie("chart-ai", d.status_distribution.ai_creative);
-  renderPie("chart-set", d.status_distribution.set_task);
-  renderPie("chart-pending", d.status_distribution.pending_listing);
+  renderPie("chart-shop", d.shop_distribution_today);
+}
+
+function leaderboardCard(title, rows) {
+  const items = (rows && rows.length)
+    ? rows.map((r, i) => `
+        <div class="dash-rank-row">
+          <span class="dash-rank-num">${i + 1}</span>
+          <span class="dash-rank-name">${escapeHtml(r.name)}</span>
+          <span class="dash-rank-count">${r.count}</span>
+        </div>
+      `).join("")
+    : `<div class="dash-empty">本月暂无完成记录</div>`;
+  return `<div class="dash-pivot-card"><h4>${title}</h4>${items}</div>`;
 }
 
 function kpiCard(label, value) {

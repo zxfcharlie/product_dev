@@ -118,6 +118,20 @@ select.cell-input[multiple] { min-height: 70px; }
 .dash-today-label { font-size: 11px; color: #8a8f99; margin-top: 4px; }
 
 .dash-chart-card canvas { max-height: 220px; }
+.dash-chart-solo { max-width: 420px; margin: 0 auto 16px; }
+.dash-rank-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #f0f1f3;
+}
+.dash-rank-row:last-child { border-bottom: none; }
+.dash-rank-num {
+  width: 22px; height: 22px; border-radius: 50%; background: #f0f1f3; color: #646a73;
+  font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.dash-rank-row:nth-child(1) .dash-rank-num { background: #ffe8b3; color: #ad7a00; }
+.dash-rank-row:nth-child(2) .dash-rank-num { background: #e3e6ea; color: #4e5969; }
+.dash-rank-row:nth-child(3) .dash-rank-num { background: #ffdcc2; color: #a15c1e; }
+.dash-rank-name { flex: 1; font-size: 13px; color: #1f2329; }
+.dash-rank-count { font-size: 14px; font-weight: 700; color: #3370ff; }
 .dash-updated { font-size: 12px; color: #8a8f99; text-align: right; margin-top: 4px; }
 
 @media (max-width: 1100px) {
