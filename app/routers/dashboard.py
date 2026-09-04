@@ -108,42 +108,69 @@ def _monthly_leaderboard(records, group_field: str, is_done) -> list:
     return [{"name": name, "count": count} for name, count in ranking]
 
 
-def _category_distribution_today(db: Session, ai_records, set_records, pending_records) -> dict:
+_STAGE_LABELS = {
+    "ai_creative": "AI主图待完成",
+    "set_task": "套图待完成",
+    "pending_listing": "上架待完成",
+}
+
+
+def _pending_category_distribution(db: Session, ai_records, set_records, pending_records) -> dict:
     """
-    当日（按创建时间）AI主图/套图/上架 这三张任务表里，按 SKU 品类统计任务数量分布，
-    图例标签把品类对应的店铺名一起带出来（比如"数字产品（ShopA）"），方便一眼看出
-    今天这些任务分别属于哪个品类、又会流向哪个店铺。
+    按 SKU 品类 + 任务阶段，统计当前所有还没完成的任务数量分布，用于饼图。
+    比如"画"这个品类：AI主图还有4个待完成、套图还有5个待完成、上架还有2个待完成，
+    会分别作为3个独立切片展示占比，标签里带上这个品类匹配到的店铺名。
+    不按创建时间过滤——不管任务是今天新建的还是很久以前遗留下来的，只要还没完成就计入，
+    这样才能看到真实的存量待办分布，而不只是当天新增的一小部分。
     一个 SKU 可能同时属于多个品类，这种情况下会计入它所属的每一个品类。
     """
-    today = _iso(0)
-    all_records = list(ai_records) + list(set_records) + list(pending_records)
-    counts = defaultdict(int)
     sku_cache = {}
-    for r in all_records:
-        d = r.data or {}
-        if d.get("created_at") != today:
-            continue
-        sku_code = d.get("related_sku")
+
+    def sku_categories(sku_code):
         if not sku_code:
-            continue
+            return []
         if sku_code not in sku_cache:
             sku_cache[sku_code] = automation.find_sku_by_code(db, sku_code)
         sku_record = sku_cache[sku_code]
         if not sku_record:
-            continue
+            return []
         categories = (sku_record.data or {}).get("category")
         if isinstance(categories, str):
             categories = [categories]
-        for cat in (categories or []):
-            cat = (cat or "").strip()
-            if cat:
-                counts[cat] += 1
+        return [c.strip() for c in (categories or []) if c and c.strip()]
 
+    counts = defaultdict(int)
+
+    for r in ai_records:
+        d = r.data or {}
+        if d.get("status") == "已完成":
+            continue
+        for cat in sku_categories(d.get("related_sku")):
+            counts[(cat, "ai_creative")] += 1
+
+    for r in set_records:
+        d = r.data or {}
+        if d.get("status") == "已完成":
+            continue
+        for cat in sku_categories(d.get("related_sku")):
+            counts[(cat, "set_task")] += 1
+
+    for r in pending_records:
+        d = r.data or {}
+        if d.get("is_listed") in (True, "true"):
+            continue
+        for cat in sku_categories(d.get("related_sku")):
+            counts[(cat, "pending_listing")] += 1
+
+    shop_cache = {}
     labeled = defaultdict(int)
-    for cat, count in counts.items():
-        shop_name, _owner = automation.resolve_shop_for_category(db, [cat])
-        label = f"{cat}（{shop_name}）" if shop_name else cat
-        labeled[label] += count
+    for (cat, stage), count in counts.items():
+        if cat not in shop_cache:
+            shop_name, _owner = automation.resolve_shop_for_category(db, [cat])
+            shop_cache[cat] = shop_name
+        shop_name = shop_cache[cat]
+        cat_label = f"{cat}（{shop_name}）" if shop_name else cat
+        labeled[f"{cat_label}-{_STAGE_LABELS[stage]}"] += count
     return dict(labeled)
 
 
@@ -184,7 +211,7 @@ def dashboard_summary(db: Session = Depends(get_db), user: User = Depends(get_cu
         ),
     }
 
-    shop_distribution_today = _category_distribution_today(db, ai_records, set_records, pending_records)
+    pending_category_distribution = _pending_category_distribution(db, ai_records, set_records, pending_records)
 
     return {
         "totals": totals,
@@ -192,6 +219,6 @@ def dashboard_summary(db: Session = Depends(get_db), user: User = Depends(get_cu
         "by_owner": by_owner,
         "today": today_block,
         "leaderboards": leaderboards,
-        "shop_distribution_today": shop_distribution_today,
+        "pending_category_distribution": pending_category_distribution,
         "generated_at": datetime.datetime.utcnow().isoformat(),
     }

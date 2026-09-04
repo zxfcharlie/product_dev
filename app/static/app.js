@@ -814,11 +814,15 @@ function renderDashboard(d) {
       ${leaderboardCard("上架任务 本月完成排行", d.leaderboards.pending_listing)}
     </div>
 
-    <div class="dash-chart-card dash-chart-solo"><h4>今日商品任务品类分布（附对应店铺）</h4><canvas id="chart-shop"></canvas></div>
+    <div class="dash-chart-card dash-chart-solo">
+      <h4>待完成任务品类分布（品类+阶段，附对应店铺）</h4>
+      <canvas id="chart-shop"></canvas>
+      <div class="dash-chart-empty dash-empty" style="display:none;">当前没有待完成的 AI主图/套图/上架 任务，暂无数据可展示</div>
+    </div>
 
     <div class="dash-updated">最近更新：${new Date(d.generated_at + "Z").toLocaleString("zh-CN")}（每 30 秒自动刷新）</div>
   `;
-  renderPie("chart-shop", d.shop_distribution_today);
+  renderPie("chart-shop", d.pending_category_distribution);
 }
 
 function leaderboardCard(title, rows) {
@@ -892,10 +896,18 @@ function badgeColorSolid(str) {
 function renderPie(canvasId, distMap) {
   const ctx = document.getElementById(canvasId);
   if (!ctx || typeof Chart === "undefined") return;
-  if (DASHBOARD_CHARTS[canvasId]) DASHBOARD_CHARTS[canvasId].destroy();
-  const labels = Object.keys(distMap).filter((k) => distMap[k] > 0);
+  if (DASHBOARD_CHARTS[canvasId]) { DASHBOARD_CHARTS[canvasId].destroy(); DASHBOARD_CHARTS[canvasId] = null; }
+  const card = ctx.closest(".dash-chart-card");
+  const emptyEl = card ? card.querySelector(".dash-chart-empty") : null;
+  const labels = Object.keys(distMap || {}).filter((k) => distMap[k] > 0);
   const values = labels.map((l) => distMap[l]);
-  if (!labels.length) return;
+  if (!labels.length) {
+    ctx.style.display = "none";
+    if (emptyEl) emptyEl.style.display = "block";
+    return;
+  }
+  ctx.style.display = "";
+  if (emptyEl) emptyEl.style.display = "none";
   DASHBOARD_CHARTS[canvasId] = new Chart(ctx, {
     type: "pie",
     data: { labels, datasets: [{ data: values, backgroundColor: labels.map(badgeColorSolid) }] },
