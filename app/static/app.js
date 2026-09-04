@@ -294,17 +294,26 @@ function escapeHtml(s) {
   }[c]));
 }
 
+let CELL_EDIT_SEQ = 0; // 每次真正进入编辑状态都发一个新令牌，见下方 activateCell 里的说明
+
 async function activateCell(recordId, fieldKey, tdEl) {
   if (tdEl.classList.contains("editing")) return;
   const schema = SCHEMAS[CURRENT_TABLE];
   const field = schema.fields.find((f) => f.key === fieldKey);
   if (!field || field.auto) return;
 
-  // 关键：必须在任何 await 之前就标记“正在编辑”，否则用户连续点击/双击同一个格子时，
-  // 会在 refreshSchemas() 这个异步等待期间并发触发第二次编辑会话，产生两个互相不知道
-  // 对方存在的 <select>——用户实际操作的那个正确保存了，另一个没人碰过的“幽灵”下拉框
-  // 之后自己失焦，会把它自己那份没被改过的旧值又保存一次，把刚保存对的值覆盖回去。
+  // 关键：必须在任何 await 之前就标记“正在编辑”，防止双击/连续点击在异步等待期间
+  // 并发触发第二次编辑会话。
   tdEl.classList.add("editing");
+
+  // 再发一个“编辑令牌”钉在这个格子上。前两轮修复分别堵了“刷新选项期间”和“保存请求
+  // 进行中”这两个我猜测的并发窗口，但问题依然存在——说明具体是什么机制生出了第二个
+  // “幽灵”编辑框我还没抓到。这次不再猜具体机制，而是从根上保证：不管什么原因导致
+  // 同一个格子出现了不止一次编辑会话，只有“最新这一次”的输入框才有资格真正提交保存，
+  // 所有更早的编辑会话即使之后触发了失焦，也会因为令牌对不上而被直接忽略，绝不会用
+  // 旧值把刚保存好的新值覆盖回去。
+  const myToken = ++CELL_EDIT_SEQ;
+  tdEl.dataset.editToken = String(myToken);
 
   // select / multiselect 的可选项可能来自配置表，进编辑前刷新一次，保证选项是最新的
   if (field.type === "select" || field.type === "multiselect") {
@@ -314,6 +323,9 @@ async function activateCell(recordId, fieldKey, tdEl) {
       // 刷新选项失败也不阻塞这次编辑，用现有的 SCHEMAS 兜底
     }
   }
+  // 等待期间这个格子可能已经被别的编辑会话接管（令牌变了）或者已经不在编辑状态了，放弃
+  if (tdEl.dataset.editToken !== String(myToken)) return;
+
   const freshField = SCHEMAS[CURRENT_TABLE].fields.find((f) => f.key === fieldKey) || field;
   const rec = RECORDS.find((r) => r.id === recordId);
   if (!rec) { tdEl.classList.remove("editing"); return; }
@@ -322,12 +334,25 @@ async function activateCell(recordId, fieldKey, tdEl) {
   tdEl.innerHTML = "";
   let input;
 
+  // 所有输入控件的“提交”统一走这里：先校验令牌，令牌不是当前这一次编辑会话的，
+  // 一律忽略，绝不提交。
+  const commit = (newValue) => {
+    if (tdEl.dataset.editToken !== String(myToken)) {
+      console.warn(
+        "[cell-edit] 检测到过期的编辑会话尝试提交，已拦截忽略：",
+        { table: CURRENT_TABLE, recordId, fieldKey, 这次会话令牌: myToken, 格子当前令牌: tdEl.dataset.editToken, 被拦下的值: newValue }
+      );
+      return;
+    }
+    finishCellEdit(recordId, fieldKey, tdEl, newValue);
+  };
+
   if (freshField.type === "select") {
     input = document.createElement("select");
     input.innerHTML = `<option value="">-- 未设置 --</option>` +
       (freshField.options || []).map((o) => `<option value="${o}" ${o === value ? "selected" : ""}>${o}</option>`).join("");
     input.onchange = () => input.blur();
-    input.onblur = () => finishCellEdit(recordId, fieldKey, tdEl, input.value);
+    input.onblur = () => commit(input.value);
   } else if (freshField.type === "multiselect") {
     input = document.createElement("select");
     input.multiple = true;
@@ -338,18 +363,18 @@ async function activateCell(recordId, fieldKey, tdEl) {
     ).join("");
     input.onblur = () => {
       const vals = [...input.selectedOptions].map((o) => o.value);
-      finishCellEdit(recordId, fieldKey, tdEl, vals);
+      commit(vals);
     };
   } else if (freshField.type === "long_text") {
     input = document.createElement("textarea");
     input.value = value || "";
-    input.onblur = () => finishCellEdit(recordId, fieldKey, tdEl, input.value);
+    input.onblur = () => commit(input.value);
     input.onkeydown = (e) => { if (e.key === "Escape") { tdEl.classList.remove("editing"); renderTable(); } };
   } else if (freshField.type === "number") {
     input = document.createElement("input");
     input.type = "number";
     input.value = value ?? "";
-    input.onblur = () => finishCellEdit(recordId, fieldKey, tdEl, input.value);
+    input.onblur = () => commit(input.value);
     input.onkeydown = (e) => {
       if (e.key === "Enter") input.blur();
       if (e.key === "Escape") { tdEl.classList.remove("editing"); renderTable(); }
@@ -358,13 +383,13 @@ async function activateCell(recordId, fieldKey, tdEl) {
     input = document.createElement("input");
     input.type = "date";
     input.value = value || "";
-    input.onblur = () => finishCellEdit(recordId, fieldKey, tdEl, input.value);
+    input.onblur = () => commit(input.value);
     input.onchange = () => input.blur();
   } else {
     input = document.createElement("input");
     input.type = "text";
     input.value = value || "";
-    input.onblur = () => finishCellEdit(recordId, fieldKey, tdEl, input.value);
+    input.onblur = () => commit(input.value);
     input.onkeydown = (e) => {
       if (e.key === "Enter") input.blur();
       if (e.key === "Escape") { tdEl.classList.remove("editing"); renderTable(); }
@@ -377,12 +402,8 @@ async function activateCell(recordId, fieldKey, tdEl) {
 }
 
 async function finishCellEdit(recordId, fieldKey, tdEl, newValue) {
-  // 关键修复：这里不能提前摘掉“正在编辑”标记。之前的问题就是这里过早摘掉了标记——
-  // 保存请求（PUT + 查询）还在网络上跑的这一两秒里，如果用户又点了一下同一个格子，
-  // 会用还没刷新的旧数据弹出第二个“幽灵”编辑框，等第一次保存完成、表格重新渲染时，
-  // 这个幽灵框被移除会触发它自己的失焦保存，把旧值又存回去——这正是"回弹"的真正原因。
   // 保存成功后 loadRecords() 会重新渲染整张表，这个 tdEl 节点连同标记会被整体替换掉，
-  // 不需要手动摘除；只有保存失败时才需要手动摘掉，否则这个格子会永久卡死点不动。
+  // 不需要手动摘除 editing 标记；只有保存失败时才需要手动摘掉，否则这个格子会永久卡死点不动。
   try {
     await saveCellValue(recordId, fieldKey, newValue);
   } catch (e) {
