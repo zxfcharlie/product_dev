@@ -412,10 +412,21 @@ async function finishCellEdit(recordId, fieldKey, tdEl, newValue) {
 }
 
 async function saveCellValue(recordId, fieldKey, value) {
-  await api(`/api/tables/${CURRENT_TABLE}/records/${recordId}`, {
-    method: "PUT", body: JSON.stringify({ data: { [fieldKey]: value } }),
-  });
-  await loadRecords();
+  // 带上这条记录“我以为的最后修改时间”，让后端做乐观锁冲突检测：如果这条记录在
+  // 我这份数据之后已经被别的标签页/别人改过了，后端会直接拒绝这次保存并提示刷新，
+  // 而不是让这次操作悄悄把别人（或自己另一个标签页）刚保存好的结果覆盖掉。
+  const rec = RECORDS.find((r) => r.id === recordId);
+  const expectedUpdatedAt = rec ? rec.updated_at : null;
+  try {
+    await api(`/api/tables/${CURRENT_TABLE}/records/${recordId}`, {
+      method: "PUT",
+      body: JSON.stringify({ data: { [fieldKey]: value }, expected_updated_at: expectedUpdatedAt }),
+    });
+  } finally {
+    // 不管保存成功还是被冲突检测拒绝，都刷新一下，让这个标签页看到数据库里最新的
+    // 真实数据，不会继续基于一份过时的视图做后续操作。
+    try { await loadRecords(); } catch (e) { /* 网络本身有问题时不重复报错 */ }
+  }
 }
 
 async function removeRecord(id) {

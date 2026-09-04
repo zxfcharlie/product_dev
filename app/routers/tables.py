@@ -199,6 +199,7 @@ def query_records(table_key: str, payload: QueryIn, db: Session = Depends(get_db
 
 class RecordIn(BaseModel):
     data: dict[str, Any]
+    expected_updated_at: Optional[str] = None  # 乐观锁：客户端提交时“它以为”的最后修改时间
 
 
 @router.post("/{table_key}/records")
@@ -271,6 +272,19 @@ def update_record(table_key: str, record_id: int, payload: RecordIn, db: Session
     record = db.query(Record).filter(Record.id == record_id, Record.table_key == table_key).first()
     if not record:
         raise HTTPException(404, "记录不存在")
+
+    # 乐观锁冲突检测：如果客户端带了它以为的“最后修改时间”，且跟数据库里实际的对不上，
+    # 说明这条记录在它看到的那份数据之后已经被别人（或它自己开的另一个标签页）改过了——
+    # 直接拒绝这次保存并提示刷新，而不是悄悄用这份过时的数据覆盖掉最新的修改。
+    # 这正是“多标签页同时编辑同一条记录，后保存的把先保存的覆盖掉”这类问题的根本解法。
+    if payload.expected_updated_at:
+        current_updated_at = record.updated_at.isoformat() if record.updated_at else None
+        if current_updated_at and payload.expected_updated_at != current_updated_at:
+            raise HTTPException(
+                409,
+                "这条记录已经被修改过了（可能是在另一个标签页/设备上），请刷新页面查看最新数据后再编辑",
+            )
+
     fmap = field_map(table_key)
     previous_data = dict(record.data or {})
     new_data = dict(record.data or {})
