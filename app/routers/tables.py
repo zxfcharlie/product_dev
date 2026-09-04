@@ -230,7 +230,8 @@ def create_record(table_key: str, payload: RecordIn, db: Session = Depends(get_d
     # 二期自动化：新建任务时按配置表自动分配负责人，覆盖表单里可能带的值
     if table_key in ("ai_creative", "set_task"):
         assigned = _safe_automation(
-            db, "assign_maker_for_create", lambda: automation.assign_maker_for_create(db, table_key)
+            db, "assign_maker_for_create",
+            lambda: automation.assign_maker_for_create(db, table_key, clean_data.get("related_sku")),
         )
         if assigned:
             clean_data["maker"] = assigned

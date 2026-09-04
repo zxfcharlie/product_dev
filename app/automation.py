@@ -76,22 +76,38 @@ def generate_task_code(db: Session, table_key: str) -> str:
     return f"{table_key.upper()}-{seq:04d}"
 
 
-def assign_round_robin(db: Session, task_type_key: str) -> Optional[str]:
+def assign_round_robin(db: Session, task_type_key: str, sku_categories=None) -> Optional[str]:
     """
-    按任务类型做轮询分配。
+    按任务类型（可选：再按品类）做轮询分配。
 
     容错设计：管理员既可能在“任务负责人配置表”里新建一行、把多个人用逗号写在
     一个“负责人”字段里，也可能习惯一人一行、建多条同类型的配置记录。
     这里统一把同一 task_type 下所有配置行的负责人合并成一个有序名单再轮询，
     轮询指针存在这批配置里 id 最小的那一行上，两种填法都能正确轮流分配。
+
+    每一行配置可以选填“适用品类”：不填表示适用所有品类（老数据没有这个字段，
+    同样按“适用所有品类”处理，完全向后兼容）；填了的话，只有这行的品类跟传入的
+    sku_categories 有交集时，这行的负责人才会参与本次轮询。
     """
     label = TASK_TYPE_LABELS.get(task_type_key)
     if not label:
         return None
-    configs = [
+    all_configs = [
         r for r in _all_records(db, "task_assignee_config")
         if (r.data or {}).get("task_type") == label
     ]
+    if not all_configs:
+        return None
+
+    categories = _normalize_category_list(sku_categories)
+
+    def config_applies(c) -> bool:
+        cfg_categories = _normalize_category_list((c.data or {}).get("categories"))
+        if not cfg_categories:
+            return True  # 没限定品类 = 适用所有品类
+        return any(cat in cfg_categories for cat in categories)
+
+    configs = [c for c in all_configs if config_applies(c)]
     if not configs:
         return None
     configs.sort(key=lambda r: r.id)
@@ -169,7 +185,7 @@ def assign_shop_fields_for_create(db: Session, related_sku: Optional[str]) -> di
     sku_categories = (sku_record.data or {}).get("category") if sku_record else None
     shop_name, owner = resolve_shop_for_category(db, sku_categories)
     if not owner:
-        owner = assign_round_robin(db, "pending_listing")
+        owner = assign_round_robin(db, "pending_listing", sku_categories)
     return {"shop_name": shop_name or "", "shop_owner": owner or ""}
 
 
@@ -208,9 +224,12 @@ def sync_priority_to_tasks(db: Session, sku_code: Optional[str], priority) -> No
             db.add(r)
 
 
-def assign_maker_for_create(db: Session, table_key: str) -> Optional[str]:
-    """新建 ai_creative / set_task 记录（无论手动还是自动）时，用来决定“制作人”字段。"""
-    return assign_round_robin(db, table_key)
+def assign_maker_for_create(db: Session, table_key: str, related_sku: Optional[str] = None) -> Optional[str]:
+    """新建 ai_creative / set_task 记录（无论手动还是自动）时，用来决定“制作人”字段。
+    传入 related_sku 时会按 SKU 的品类过滤任务负责人配置表里限定了品类的配置行。"""
+    sku_record = find_sku_by_code(db, related_sku) if related_sku else None
+    sku_categories = (sku_record.data or {}).get("category") if sku_record else None
+    return assign_round_robin(db, table_key, sku_categories)
 
 
 def on_sku_created(db: Session, sku_record: Record, creator_id: int) -> None:
@@ -224,7 +243,7 @@ def on_sku_created(db: Session, sku_record: Record, creator_id: int) -> None:
         "task_code": generate_task_code(db, "ai_creative"),
         "related_sku": sku_code,
         "status": "待制作",
-        "maker": assign_maker_for_create(db, "ai_creative") or "",
+        "maker": assign_round_robin(db, "ai_creative", data.get("category")) or "",
         "competitor_link": data.get("competitor_link", ""),
         "design_highlight": data.get("design_highlight", ""),
         "priority": data.get("priority", 0),
@@ -245,11 +264,12 @@ def on_ai_creative_saved(db: Session, record: Record, previous_status: Optional[
         sync_sku_dev_stage(db, sku_code, "套图制作中")
         if not data.get("_spawned_set_task"):
             sku_record = find_sku_by_code(db, sku_code)
+            sku_categories = (sku_record.data or {}).get("category") if sku_record else None
             set_data = {
                 "task_code": generate_task_code(db, "set_task"),
                 "related_sku": sku_code,
                 "status": "待制作",
-                "maker": assign_maker_for_create(db, "set_task") or "",
+                "maker": assign_round_robin(db, "set_task", sku_categories) or "",
                 "competitor_link": data.get("competitor_link", ""),
                 "priority": (sku_record.data or {}).get("priority", 0) if sku_record else data.get("priority", 0),
                 "created_at": datetime.date.today().isoformat(),
