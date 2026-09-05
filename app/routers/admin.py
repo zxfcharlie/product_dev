@@ -21,6 +21,7 @@ def list_users(db: Session = Depends(get_db), admin: User = Depends(require_admi
             "role": u.role,
             "note": u.note or "",
             "is_active": u.is_active,
+            "is_approved": u.is_approved,
             "created_at": u.created_at.isoformat() if u.created_at else None,
         }
         for u in users
@@ -40,6 +41,23 @@ def update_user_note(user_id: int, payload: UserNoteIn, db: Session = Depends(ge
     u.note = payload.note
     db.commit()
     return {"ok": True}
+
+
+class ApprovalIn(BaseModel):
+    approved: bool
+
+
+@router.put("/users/{user_id}/approve")
+def set_user_approval(user_id: int, payload: ApprovalIn, db: Session = Depends(get_db),
+                       admin: User = Depends(require_admin)):
+    if user_id == admin.id and not payload.approved:
+        raise HTTPException(400, "不能取消自己的审核状态")
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(404, "用户不存在")
+    u.is_approved = payload.approved
+    db.commit()
+    return {"ok": True, "is_approved": u.is_approved}
 
 
 @router.delete("/users/{user_id}")

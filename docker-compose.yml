@@ -23,8 +23,12 @@ services:
     environment:
       DATABASE_URL: postgresql://etsy:${POSTGRES_PASSWORD:-etsy_password}@db:5432/etsy_system
       SECRET_KEY: ${SECRET_KEY:-please-change-this-secret-key}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
     ports:
-      - "8000:8000"
+      # 只绑定在本机回环地址上：外部流量必须经过 Apache/Nginx 反代（走 80/443），
+      # 不能绕过反代和 HTTPS 直接打到应用端口。如果暂时还没配反代、想直接用IP+端口
+      # 测试访问，临时把这行改成 "8000:8000"（不建议长期这样，生产环境记得改回来）。
+      - "127.0.0.1:8000:8000"
 
 volumes:
   pgdata:

@@ -69,6 +69,19 @@ def _run_lightweight_migrations():
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS note TEXT"))
 
+        # 新增“是否已审核”字段。关键点：只有这一列第一次被创建的那次，才把所有
+        # 已经存在的账号统一标记为“已审核”——避免这个安全功能一上线，就把正在
+        # 正常使用系统的老同事全部挡在登录页外面。这一列一旦存在，以后每次重启
+        # 都不会再重复这个“老账号自动放行”的动作，新注册的账号该走审核还是走审核。
+        result = conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='users' AND column_name='is_approved'"
+        ))
+        column_already_existed = result.first() is not None
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_approved BOOLEAN DEFAULT false"))
+        if not column_already_existed:
+            conn.execute(text("UPDATE users SET is_approved = true"))
+
 
 def _migrate_market_heat_to_priority():
     """SKU 的“市场热度”字段改名叫“优先级”，key 也从 market_heat 换成 priority，

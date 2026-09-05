@@ -6,6 +6,7 @@ let VIEWS = [];
 let ACTIVE_VIEW_ID = null; // null = 默认 Grid
 let RECORDS = [];
 let USER_ADMIN_MODE = false;
+let PENDING_USER_COUNT = null; // 待审核账号数量，管理员登录后懒加载一次，用于侧边栏小红点
 let DASHBOARD_MODE = false;
 let DASHBOARD_TIMER = null;
 let DASHBOARD_CHARTS = {};
@@ -64,6 +65,14 @@ async function init() {
   document.getElementById("user-name").textContent =
     window.CURRENT_USER.display_name + (window.CURRENT_USER.role === "admin" ? "（管理员）" : "");
   await refreshSchemas();
+  if (window.CURRENT_USER.role === "admin") {
+    try {
+      const users = await api("/api/admin/users");
+      PENDING_USER_COUNT = users.filter((u) => !u.is_approved).length;
+    } catch (e) {
+      PENDING_USER_COUNT = 0;
+    }
+  }
   const tableKeys = Object.keys(SCHEMAS).sort((a, b) => SCHEMAS[a].order - SCHEMAS[b].order);
   renderSidebar(tableKeys);
   if (tableKeys.length) selectTable(tableKeys[0]);
@@ -101,7 +110,7 @@ function renderSidebar(tableKeys) {
     el.appendChild(header);
     const item = document.createElement("div");
     item.className = "table-item" + (USER_ADMIN_MODE ? " active" : "");
-    item.textContent = "👤 用户管理";
+    item.textContent = "👤 用户管理" + (PENDING_USER_COUNT ? ` 🔴${PENDING_USER_COUNT}` : "");
     item.onclick = () => selectUserAdmin();
     item.dataset.key = "__user_admin__";
     el.appendChild(item);
@@ -710,7 +719,7 @@ function renderUserAdminTable(users) {
   const head = document.getElementById("grid-head");
   const body = document.getElementById("grid-body");
   head.innerHTML = `<tr>
-    <th class="col-idx">#</th><th>用户名</th><th>姓名</th><th>角色</th>
+    <th class="col-idx">#</th><th>用户名</th><th>姓名</th><th>角色</th><th>审核状态</th>
     <th>备注</th><th>创建时间</th><th class="col-actions">操作</th>
   </tr>`;
   body.innerHTML = "";
@@ -719,17 +728,34 @@ function renderUserAdminTable(users) {
     const roleBadge = u.role === "admin"
       ? `<span class="badge" style="background:#ffe8cc">管理员</span>`
       : `<span class="badge" style="background:#e5f3ff">成员</span>`;
+    const approvalBadge = u.is_approved
+      ? `<span class="badge" style="background:#e0f7e9">已审核</span>`
+      : `<span class="badge" style="background:#ffe3e3">待审核</span>`;
+    const approvalAction = u.is_approved
+      ? `<a href="#" onclick="setUserApproval(${u.id}, false); return false;">取消审核</a>`
+      : `<a href="#" onclick="setUserApproval(${u.id}, true); return false;">批准</a>`;
     row.innerHTML = `
       <td class="col-idx">${idx + 1}</td>
       <td>${escapeHtml(u.username)}</td>
       <td>${escapeHtml(u.display_name)}</td>
       <td>${roleBadge}</td>
+      <td>${approvalBadge}</td>
       <td class="editable-cell" onclick="activateUserNoteCell(${u.id}, this)">${escapeHtml(u.note || "")}</td>
       <td>${u.created_at ? u.created_at.split("T")[0] : ""}</td>
-      <td class="col-actions"><a href="#" onclick="removeUser(${u.id}); return false;">删除</a></td>
+      <td class="col-actions">${approvalAction} · <a href="#" onclick="removeUser(${u.id}); return false;">删除</a></td>
     `;
     body.appendChild(row);
   });
+}
+
+async function setUserApproval(userId, approved) {
+  await api(`/api/admin/users/${userId}/approve`, {
+    method: "PUT", body: JSON.stringify({ approved }),
+  });
+  const users = await api("/api/admin/users");
+  PENDING_USER_COUNT = users.filter((u) => !u.is_approved).length;
+  renderUserAdminTable(users);
+  renderSidebar(Object.keys(SCHEMAS).sort((a, b) => SCHEMAS[a].order - SCHEMAS[b].order));
 }
 
 function activateUserNoteCell(userId, td) {
@@ -759,7 +785,9 @@ async function removeUser(userId) {
   if (!confirm("确定删除这个用户吗？此操作不可恢复。")) return;
   await api(`/api/admin/users/${userId}`, { method: "DELETE" });
   const users = await api("/api/admin/users");
+  PENDING_USER_COUNT = users.filter((u) => !u.is_approved).length;
   renderUserAdminTable(users);
+  renderSidebar(Object.keys(SCHEMAS).sort((a, b) => SCHEMAS[a].order - SCHEMAS[b].order));
 }
 
 // ---------------- 仪表盘 ----------------

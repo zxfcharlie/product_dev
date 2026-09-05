@@ -6,7 +6,7 @@
 <link rel="stylesheet" href="/static/style.css?v={{ app_version }}">
 </head>
 <body class="auth-body">
-  <div class="auth-card">
+  <div class="auth-card" id="auth-card">
     <h2>注册账号</h2>
     <div id="err" class="auth-error"></div>
     <input id="display_name" placeholder="姓名" />
@@ -14,7 +14,7 @@
     <input id="password" type="password" placeholder="密码" />
     <button onclick="doRegister()">注册</button>
     <p class="auth-switch">已有账号？<a href="/login">去登录</a></p>
-    <p class="auth-hint">提示：第一个注册的账号会自动成为管理员。</p>
+    <p class="auth-hint">提示：第一个注册的账号会自动成为管理员并直接可用；其它账号注册后需要等管理员审核通过才能登录。</p>
   </div>
 <script>
 async function doRegister() {
@@ -25,8 +25,17 @@ async function doRegister() {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({display_name, username, password})
   });
-  if (res.ok) { window.location.href = '/login'; }
-  else {
+  if (res.ok) {
+    const j = await res.json();
+    if (j.is_approved) {
+      window.location.href = '/login';
+    } else {
+      document.getElementById('auth-card').innerHTML =
+        '<h2>注册成功</h2>' +
+        '<p class="auth-hint">账号已提交，需要等待管理员审核通过后才能登录，请稍后再来。</p>' +
+        '<p class="auth-switch"><a href="/login">去登录页面</a></p>';
+    }
+  } else {
     const j = await res.json().catch(() => ({detail: '注册失败'}));
     document.getElementById('err').textContent = j.detail || '注册失败';
   }
